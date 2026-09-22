@@ -20,6 +20,11 @@ const envSchema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
   SMTP_FROM: z.string().default("Alight FMS <no-reply@alight-fms.local>"),
+
+  FMS_ENCRYPTION_KEY: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/i, "FMS_ENCRYPTION_KEY must be a 32-byte (64 hex character) key.")
+    .describe("AES-256-GCM key used to encrypt OTP provider credentials at rest."),
 });
 
 const parsed = envSchema.safeParse(process.env);

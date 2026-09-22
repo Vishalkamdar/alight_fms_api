@@ -8,8 +8,10 @@ import {
   forgotPasswordSchema,
   loginSchema,
   refreshTokenSchema,
+  requestLoginOtpSchema,
   resetPasswordSchema,
   signupSchema,
+  verifyLoginOtpSchema,
 } from "../schemas/auth.schema";
 import * as authController from "../controllers/auth.controller";
 
@@ -32,6 +34,20 @@ router.post(
 );
 
 router.post("/login", authRateLimiter, validate(loginSchema, "body"), authController.login);
+
+// SMS OTP login — the alternate path when FmsConfiguration.loginAuthenticationMethod = SMS_OTP.
+router.post(
+  "/login/otp/request",
+  authRateLimiter,
+  validate(requestLoginOtpSchema, "body"),
+  authController.requestLoginOtp
+);
+router.post(
+  "/login/otp/verify",
+  authRateLimiter,
+  validate(verifyLoginOtpSchema, "body"),
+  authController.verifyLoginOtp
+);
 
 router.post(
   "/refresh-token",

@@ -9,8 +9,10 @@ import type {
   ForgotPasswordInput,
   LoginInput,
   RefreshTokenInput,
+  RequestLoginOtpInput,
   ResetPasswordInput,
   SignupInput,
+  VerifyLoginOtpInput,
 } from "../schemas/auth.schema";
 
 function requestContext(req: AuthenticatedRequest): authService.RequestContext {
@@ -29,6 +31,18 @@ export async function signup(req: AuthenticatedRequest, res: Response): Promise<
 export async function login(req: AuthenticatedRequest, res: Response): Promise<void> {
   const body = res.locals.body as LoginInput;
   const result = await authService.login(body, requestContext(req));
+  sendSuccess(res, result, { message: "Login successful" });
+}
+
+export async function requestLoginOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { mobileNumber } = res.locals.body as RequestLoginOtpInput;
+  await authService.requestLoginOtp(mobileNumber, requestContext(req));
+  sendSuccess(res, null, { message: "OTP sent to your registered mobile number." });
+}
+
+export async function verifyLoginOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { mobileNumber, otp } = res.locals.body as VerifyLoginOtpInput;
+  const result = await authService.loginWithOtp(mobileNumber, otp, requestContext(req));
   sendSuccess(res, result, { message: "Login successful" });
 }
 

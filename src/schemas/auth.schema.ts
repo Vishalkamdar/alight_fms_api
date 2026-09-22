@@ -30,6 +30,22 @@ export const loginSchema = z.object({
   password: z.string().min(1, "Password is required."),
 });
 
+const mobileNumberSchema = z
+  .string()
+  .trim()
+  .min(6, "Enter a valid mobile number.")
+  .max(15, "Enter a valid mobile number.")
+  .regex(/^\d+$/, "Mobile number must contain digits only.");
+
+export const requestLoginOtpSchema = z.object({
+  mobileNumber: mobileNumberSchema,
+});
+
+export const verifyLoginOtpSchema = z.object({
+  mobileNumber: mobileNumberSchema,
+  otp: z.string().trim().min(4, "Enter the OTP.").max(10).regex(/^\d+$/, "OTP must contain digits only."),
+});
+
 export const forgotPasswordSchema = z.object({
   email: z.string().trim().toLowerCase().min(1, "Email is required.").email("Enter a valid email address."),
 });
@@ -50,6 +66,8 @@ export const refreshTokenSchema = z.object({
 
 export type SignupInput = z.infer<typeof signupSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
+export type RequestLoginOtpInput = z.infer<typeof requestLoginOtpSchema>;
+export type VerifyLoginOtpInput = z.infer<typeof verifyLoginOtpSchema>;
 export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;

@@ -7,6 +7,7 @@ import { signAccessToken } from "../utils/jwt";
 import { parseDurationToSeconds } from "../utils/duration";
 import { generateOpaqueToken, sha256Hex } from "../utils/hash";
 import { logActivity } from "../utils/activity-log";
+import * as otpService from "./otp.service";
 import {
   findActiveRefreshToken,
   issueRefreshToken,
@@ -162,6 +163,103 @@ export async function login(input: LoginInput, context: RequestContext) {
     action: "LOGIN_SUCCESS",
     module: "AUTH",
     description: "User logged in successfully.",
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
+  return buildTokenResponse(user, context);
+}
+
+/**
+ * Step 1 of SMS OTP login — the "Login Authentication Method = SMS OTP"
+ * path (see FmsConfiguration). Per spec, an unregistered mobile number must
+ * never be allowed to proceed to authentication.
+ */
+export async function requestLoginOtp(mobileNumber: string, context: RequestContext): Promise<void> {
+  const user = await UserModel.findOne({ phone: mobileNumber });
+
+  if (!user) {
+    await logActivity({
+      action: "LOGIN_FAILED",
+      module: "AUTH",
+      description: `SMS OTP login requested for unregistered mobile number ${mobileNumber}.`,
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
+    throw new AppError(401, "This mobile number is not registered.");
+  }
+
+  if (!user.isActive) {
+    await logActivity({
+      user: user._id,
+      action: "LOGIN_FAILED",
+      module: "AUTH",
+      description: "SMS OTP login requested for a deactivated account.",
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
+    throw new AppError(403, "Your account has been deactivated.");
+  }
+
+  await otpService.requestOtp({ user: user._id, mobileNumber, purpose: "LOGIN" });
+
+  await logActivity({
+    user: user._id,
+    action: "LOGIN_OTP_REQUESTED",
+    module: "AUTH",
+    description: "Login OTP requested.",
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+}
+
+/** Step 2 of SMS OTP login — validates the OTP and, on success, issues tokens exactly like password login. */
+export async function loginWithOtp(mobileNumber: string, code: string, context: RequestContext) {
+  const user = await UserModel.findOne({ phone: mobileNumber });
+  if (!user) {
+    throw new AppError(401, "This mobile number is not registered.");
+  }
+
+  try {
+    await otpService.validateOtp({ mobileNumber, purpose: "LOGIN", code });
+  } catch (error) {
+    await logActivity({
+      user: user._id,
+      action: "LOGIN_FAILED",
+      module: "AUTH",
+      description: "SMS OTP login failed — invalid, expired, or already-used OTP.",
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
+    throw error;
+  }
+
+  if (!user.isActive) {
+    await logActivity({
+      user: user._id,
+      action: "LOGIN_FAILED",
+      module: "AUTH",
+      description: "SMS OTP login failed — account is deactivated.",
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
+    throw new AppError(403, "Your account has been deactivated.");
+  }
+
+  user.lastLoginAt = new Date();
+  await user.save();
+
+  await logActivity({
+    user: user._id,
+    action: "LOGIN_SUCCESS",
+    module: "AUTH",
+    description: "User logged in successfully via SMS OTP.",
     status: "SUCCESS",
     ipAddress: context.ipAddress,
     userAgent: context.userAgent,
