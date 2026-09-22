@@ -26,55 +26,59 @@ router.get(
   controller.getMyNodeRole
 );
 
-// Admin-managed FMS role assignments.
+// Admin-managed FMS role assignments — this is FMS Operational Roles
+// Manager's entire purpose, so it gets full read/write here (unlike
+// users.routes.ts, where it's read-only).
+const canManageAssignments = authorizeRoles("Admin", "Super Admin", "FMS Operational Roles Manager");
+
 router.post(
   "/user-node-roles",
-  authorizeRoles("Admin", "Super Admin"),
+  canManageAssignments,
   validate(createUserNodeRoleSchema, "body"),
   controller.createUserNodeRole
 );
 router.get(
   "/user-node-roles",
-  authorizeRoles("Admin", "Super Admin"),
+  canManageAssignments,
   validate(userNodeRoleListQuerySchema, "query"),
   controller.listUserNodeRoles
 );
 router.get(
   "/user-node-roles/:id",
-  authorizeRoles("Admin", "Super Admin"),
+  canManageAssignments,
   validate(objectIdParamsSchema, "params"),
   controller.getUserNodeRoleById
 );
 router.put(
   "/user-node-roles/:id",
-  authorizeRoles("Admin", "Super Admin"),
+  canManageAssignments,
   validate(objectIdParamsSchema, "params"),
   validate(updateUserNodeRoleSchema, "body"),
   controller.updateUserNodeRole
 );
 router.patch(
   "/user-node-roles/:id/status",
-  authorizeRoles("Admin", "Super Admin"),
+  canManageAssignments,
   validate(objectIdParamsSchema, "params"),
   validate(updateAssignmentStatusSchema, "body"),
   controller.updateUserNodeRoleStatus
 );
 router.delete(
   "/user-node-roles/:id",
-  authorizeRoles("Admin", "Super Admin"),
+  canManageAssignments,
   validate(objectIdParamsSchema, "params"),
   controller.deleteUserNodeRole
 );
 
 router.get(
   "/users/:userId/nodes",
-  authorizeRoles("Admin", "Super Admin"),
+  canManageAssignments,
   validate(userIdParamsSchema, "params"),
   controller.getUserNodes
 );
 router.get(
   "/nodes/:nodeId/users",
-  authorizeRoles("Admin", "Super Admin"),
+  canManageAssignments,
   validate(nodeIdParamsSchema, "params"),
   validate(nodeUsersQuerySchema, "query"),
   controller.getNodeUsers

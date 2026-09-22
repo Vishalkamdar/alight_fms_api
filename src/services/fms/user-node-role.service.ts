@@ -1,5 +1,6 @@
 import { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
+import { logActivity } from "../../utils/activity-log";
 import { UserModel } from "../../models/User";
 import { OrganizationNodeModel } from "../../models/OrganizationNode";
 import { NodeTypeModel } from "../../models/NodeType";
@@ -19,6 +20,11 @@ import type {
 } from "../../schemas/fms/user-node-role.schema";
 
 type IdLike = string | Types.ObjectId;
+
+interface ActorContext {
+  ipAddress?: string | null;
+  userAgent?: string | null;
+}
 
 const ROLE_ENABLED_FIELD: Record<FmsRole, "makerEnabled" | "verifierEnabled" | "checkerEnabled"> = {
   Maker: "makerEnabled",
@@ -106,7 +112,8 @@ async function writeAudit(params: WriteAuditParams): Promise<void> {
 
 export async function createAssignment(
   input: CreateUserNodeRoleInput,
-  actorId: Types.ObjectId
+  actorId: Types.ObjectId,
+  context: ActorContext = {}
 ): Promise<FmsUserNodeRoleDocument> {
   await assertUserExistsAndActive(input.user);
   await assertNodeExistsAndActive(input.node);
@@ -142,6 +149,17 @@ export async function createAssignment(
       performedBy: actorId,
     });
 
+    await logActivity({
+      user: actorId,
+      action: "USER_NODE_ASSIGNED",
+      module: "USER",
+      description: `Reactivated ${existing.role} role for user on node.`,
+      entityType: "FmsUserNodeRole",
+      entityId: existing._id,
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
+
     return existing;
   }
 
@@ -163,6 +181,17 @@ export async function createAssignment(
     newRole: created.role,
     newStatus: created.status,
     performedBy: actorId,
+  });
+
+  await logActivity({
+    user: actorId,
+    action: "USER_NODE_ASSIGNED",
+    module: "USER",
+    description: `Assigned ${created.role} role for user on node.`,
+    entityType: "FmsUserNodeRole",
+    entityId: created._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
   });
 
   return created;
@@ -293,7 +322,8 @@ export async function updateAssignment(
 export async function updateAssignmentStatus(
   id: string,
   status: AssignmentStatus,
-  actorId: Types.ObjectId
+  actorId: Types.ObjectId,
+  context: ActorContext = {}
 ): Promise<FmsUserNodeRoleDocument> {
   const assignment = await getAssignmentById(id);
 
@@ -333,10 +363,25 @@ export async function updateAssignmentStatus(
     performedBy: actorId,
   });
 
+  await logActivity({
+    user: actorId,
+    action: status === "Active" ? "USER_NODE_ASSIGNED" : "USER_NODE_REMOVED",
+    module: "USER",
+    description: `${status === "Active" ? "Activated" : "Deactivated"} ${assignment.role} role for user on node.`,
+    entityType: "FmsUserNodeRole",
+    entityId: assignment._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
   return assignment;
 }
 
-export async function removeAssignment(id: string, actorId: Types.ObjectId): Promise<void> {
+export async function removeAssignment(
+  id: string,
+  actorId: Types.ObjectId,
+  context: ActorContext = {}
+): Promise<void> {
   const assignment = await getAssignmentById(id);
 
   // Audit is written before the delete so the permanent trail survives the
@@ -349,6 +394,17 @@ export async function removeAssignment(id: string, actorId: Types.ObjectId): Pro
     previousRole: assignment.role,
     previousStatus: assignment.status,
     performedBy: actorId,
+  });
+
+  await logActivity({
+    user: actorId,
+    action: "USER_NODE_REMOVED",
+    module: "USER",
+    description: `Removed ${assignment.role} role assignment for user on node.`,
+    entityType: "FmsUserNodeRole",
+    entityId: assignment._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
   });
 
   await assignment.deleteOne();

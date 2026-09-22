@@ -12,6 +12,7 @@ import {
   updateOrganizationNodeStatusSchema,
 } from "../schemas/organization-node.schema";
 import {
+  bulkImportOrganizationNodes,
   createOrganizationNode,
   deleteOrganizationNode,
   getOrganizationNode,
@@ -27,13 +28,15 @@ const router = Router();
 
 router.use(authenticate);
 
-// Master Setup / hierarchy configuration is Super Admin-only; Admin gets
-// read-only access so they can pick nodes while assigning users.
-const canRead = authorizeRoles("Super Admin", "Admin");
+// Master Setup / hierarchy configuration is Super Admin-only; Admin and FMS
+// Operational Roles Manager get read-only access so they can pick nodes
+// while assigning users to Maker/Verifier/Checker roles.
+const canRead = authorizeRoles("Super Admin", "Admin", "FMS Operational Roles Manager");
 const canWrite = authorizeRoles("Super Admin");
 
-// Must be registered before "/:id" so "tree" isn't captured as an id.
+// Must be registered before "/:id" so these static segments aren't captured as an id.
 router.get("/tree", canRead, getOrganizationTree);
+router.post("/bulk-import", canWrite, bulkImportOrganizationNodes);
 
 router.get("/", canRead, validate(organizationNodeListQuerySchema, "query"), listOrganizationNodes);
 router.post("/", canWrite, validate(createOrganizationNodeSchema, "body"), createOrganizationNode);

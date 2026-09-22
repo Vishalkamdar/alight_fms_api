@@ -2,9 +2,15 @@ import { Types } from "mongoose";
 import fs from "fs/promises";
 import path from "path";
 import { recordAudit } from "../../utils/fms/audit-log";
+import { logActivity } from "../../utils/activity-log";
 import { FmsSystemConfigModel, FmsSystemConfigDocument } from "../../models/fms/FmsSystemConfig";
 import type { UpdateSystemConfigInput } from "../../schemas/fms/system-config.schema";
 import { UPLOAD_ROOT_DIR } from "../../utils/fms/upload";
+
+interface ActorContext {
+  ipAddress: string | null;
+  userAgent?: string | null;
+}
 
 /** The config is a singleton keyed by `key: "system"` — create it with defaults on first access. */
 export async function getOrCreateConfig(): Promise<FmsSystemConfigDocument> {
@@ -17,7 +23,7 @@ export async function getOrCreateConfig(): Promise<FmsSystemConfigDocument> {
 export async function updateConfig(
   input: UpdateSystemConfigInput,
   actorId: Types.ObjectId,
-  ipAddress: string | null
+  context: ActorContext
 ): Promise<FmsSystemConfigDocument> {
   const config = await getOrCreateConfig();
   const previousValue = config.toObject();
@@ -25,6 +31,8 @@ export async function updateConfig(
   if (input.systemName !== undefined) config.systemName = input.systemName;
   if (input.primaryColor !== undefined) config.primaryColor = input.primaryColor;
   if (input.secondaryColor !== undefined) config.secondaryColor = input.secondaryColor;
+  if (input.activityLogRetentionDays !== undefined)
+    config.activityLogRetentionDays = input.activityLogRetentionDays;
   config.updatedBy = actorId;
 
   await config.save();
@@ -36,7 +44,18 @@ export async function updateConfig(
     entityId: config._id,
     previousValue,
     newValue: config.toObject(),
-    ipAddress,
+    ipAddress: context.ipAddress,
+  });
+
+  await logActivity({
+    user: actorId,
+    action: "SYSTEM_CONFIG_UPDATED",
+    module: "FMS_CONFIG",
+    description: "Company settings (branding/retention) updated.",
+    entityType: "FmsSystemConfig",
+    entityId: config._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
   });
 
   return config;
@@ -45,7 +64,7 @@ export async function updateConfig(
 export async function replaceLogo(
   storedFileName: string,
   actorId: Types.ObjectId,
-  ipAddress: string | null
+  context: ActorContext
 ): Promise<FmsSystemConfigDocument> {
   const config = await getOrCreateConfig();
   const previousLogoUrl = config.logoUrl;
@@ -70,7 +89,18 @@ export async function replaceLogo(
     entityId: config._id,
     previousValue: { logoUrl: previousLogoUrl },
     newValue: { logoUrl: config.logoUrl },
-    ipAddress,
+    ipAddress: context.ipAddress,
+  });
+
+  await logActivity({
+    user: actorId,
+    action: "SYSTEM_CONFIG_UPDATED",
+    module: "FMS_CONFIG",
+    description: "Company logo replaced.",
+    entityType: "FmsSystemConfig",
+    entityId: config._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
   });
 
   return config;

@@ -38,3 +38,24 @@ export const uploadLogo = multer({
     callback(null, true);
   },
 }).single("logo");
+
+/**
+ * In-memory (no disk write) storage for bulk-import CSVs — the file is
+ * parsed once and discarded, never served back, so there is nothing to
+ * persist to disk for.
+ */
+const ALLOWED_CSV_MIME_TYPES = new Set(["text/csv", "application/vnd.ms-excel", "text/plain"]);
+const MAX_CSV_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
+
+export const uploadCsv = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_CSV_SIZE_BYTES },
+  fileFilter: (_req, file, callback) => {
+    const hasCsvExtension = path.extname(file.originalname).toLowerCase() === ".csv";
+    if (!ALLOWED_CSV_MIME_TYPES.has(file.mimetype) && !hasCsvExtension) {
+      callback(new Error("Only .csv files are allowed."));
+      return;
+    }
+    callback(null, true);
+  },
+}).single("file");

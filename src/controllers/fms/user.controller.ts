@@ -7,7 +7,12 @@ import type { CreateUserInput, UpdateUserInput, UserListQuery } from "../../sche
 
 function requestContext(req: AuthenticatedRequest): userService.RequestContext {
   if (!req.user) throw new AppError(401, "Authentication required.");
-  return { actorId: req.user._id, actorRole: req.user.role, ipAddress: req.ip ?? null };
+  return {
+    actorId: req.user._id,
+    actorRole: req.user.role,
+    ipAddress: req.ip ?? null,
+    userAgent: req.headers["user-agent"] ?? null,
+  };
 }
 
 export async function createUser(req: AuthenticatedRequest, res: Response): Promise<void> {

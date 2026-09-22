@@ -6,6 +6,7 @@ import { comparePassword, hashPassword } from "../utils/password";
 import { signAccessToken } from "../utils/jwt";
 import { parseDurationToSeconds } from "../utils/duration";
 import { generateOpaqueToken, sha256Hex } from "../utils/hash";
+import { logActivity } from "../utils/activity-log";
 import {
   findActiveRefreshToken,
   issueRefreshToken,
@@ -111,25 +112,60 @@ export async function signup(input: SignupInput, requestedBy: UserDocument | und
 }
 
 export async function login(input: LoginInput, context: RequestContext) {
-  const user = await UserModel.findOne({ email: input.email.toLowerCase().trim() }).select(
-    "+password"
-  );
+  const email = input.email.toLowerCase().trim();
+  const user = await UserModel.findOne({ email }).select("+password");
 
   if (!user) {
+    await logActivity({
+      action: "LOGIN_FAILED",
+      module: "AUTH",
+      description: `Login attempt failed — no account found for ${email}.`,
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
     throw new AppError(401, "Invalid email or password.");
   }
 
   const passwordMatches = await comparePassword(input.password, user.password);
   if (!passwordMatches) {
+    await logActivity({
+      user: user._id,
+      action: "LOGIN_FAILED",
+      module: "AUTH",
+      description: "Login attempt failed — incorrect password.",
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
     throw new AppError(401, "Invalid email or password.");
   }
 
   if (!user.isActive) {
+    await logActivity({
+      user: user._id,
+      action: "LOGIN_FAILED",
+      module: "AUTH",
+      description: "Login attempt failed — account is deactivated.",
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
     throw new AppError(403, "Your account has been deactivated.");
   }
 
   user.lastLoginAt = new Date();
   await user.save();
+
+  await logActivity({
+    user: user._id,
+    action: "LOGIN_SUCCESS",
+    module: "AUTH",
+    description: "User logged in successfully.",
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
 
   return buildTokenResponse(user, context);
 }
@@ -160,6 +196,16 @@ export async function refreshAccessToken(rawToken: string, context: RequestConte
 
   await revokeRefreshToken(existing, newDocument._id as Types.ObjectId);
 
+  await logActivity({
+    user: user._id,
+    action: "REFRESH_TOKEN",
+    module: "AUTH",
+    description: "Access token refreshed.",
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
   return {
     tokenType: "Bearer" as const,
     accessToken,
@@ -169,24 +215,44 @@ export async function refreshAccessToken(rawToken: string, context: RequestConte
   };
 }
 
-export async function logout(rawToken: string): Promise<void> {
+export async function logout(rawToken: string, context: RequestContext): Promise<void> {
   const existing = await findActiveRefreshToken(rawToken);
   if (existing) {
     await revokeRefreshToken(existing);
+    await logActivity({
+      user: existing.user,
+      action: "LOGOUT",
+      module: "AUTH",
+      description: "User logged out.",
+      status: "SUCCESS",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
   }
 }
 
-export async function logoutAll(userId: Types.ObjectId): Promise<void> {
+export async function logoutAll(userId: Types.ObjectId, context: RequestContext): Promise<void> {
   await Promise.all([
     revokeAllRefreshTokensForUser(userId),
     UserModel.updateOne({ _id: userId }, { $inc: { tokenVersion: 1 } }),
   ]);
+
+  await logActivity({
+    user: userId,
+    action: "LOGOUT_ALL",
+    module: "AUTH",
+    description: "User logged out from all devices.",
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
 }
 
 export async function changePassword(
   user: UserDocument,
   currentPassword: string,
-  newPassword: string
+  newPassword: string,
+  context: RequestContext
 ): Promise<void> {
   const fullUser = await UserModel.findById(user._id).select("+password");
   if (!fullUser) {
@@ -195,6 +261,15 @@ export async function changePassword(
 
   const currentMatches = await comparePassword(currentPassword, fullUser.password);
   if (!currentMatches) {
+    await logActivity({
+      user: fullUser._id,
+      action: "PASSWORD_CHANGED",
+      module: "AUTH",
+      description: "Password change failed — incorrect current password.",
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
     throw new AppError(400, "Current password is incorrect.", {
       currentPassword: ["Current password is incorrect."],
     });
@@ -206,16 +281,37 @@ export async function changePassword(
 
   await revokeAllRefreshTokensForUser(fullUser._id);
 
+  await logActivity({
+    user: fullUser._id,
+    action: "PASSWORD_CHANGED",
+    module: "AUTH",
+    description: "Password changed successfully.",
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
   void sendPasswordChangedEmail(fullUser.email, fullUser.fullname).catch((error: unknown) =>
     console.error("[email] failed to send password-changed email:", error)
   );
 }
 
-export async function forgotPassword(email: string): Promise<void> {
-  const user = await UserModel.findOne({ email: email.toLowerCase().trim() });
+export async function forgotPassword(email: string, context: RequestContext): Promise<void> {
+  const normalizedEmail = email.toLowerCase().trim();
+  const user = await UserModel.findOne({ email: normalizedEmail });
 
   // Same response whether or not the account exists — never confirm/deny an email on file.
-  if (!user) return;
+  if (!user) {
+    await logActivity({
+      action: "PASSWORD_RESET_REQUESTED",
+      module: "AUTH",
+      description: `Password reset requested for unknown email ${normalizedEmail}.`,
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
+    return;
+  }
 
   const rawToken = generateOpaqueToken(32);
   user.passwordResetToken = sha256Hex(rawToken);
@@ -224,12 +320,26 @@ export async function forgotPassword(email: string): Promise<void> {
 
   const resetUrl = `${env.CLIENT_URL}/reset-password?token=${rawToken}`;
 
+  await logActivity({
+    user: user._id,
+    action: "PASSWORD_RESET_REQUESTED",
+    module: "AUTH",
+    description: "Password reset requested.",
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
   void sendPasswordResetEmail(user.email, user.fullname, resetUrl).catch((error: unknown) =>
     console.error("[email] failed to send password reset email:", error)
   );
 }
 
-export async function resetPassword(rawToken: string, newPassword: string): Promise<void> {
+export async function resetPassword(
+  rawToken: string,
+  newPassword: string,
+  context: RequestContext
+): Promise<void> {
   const tokenHash = sha256Hex(rawToken);
 
   const user = await UserModel.findOne({ passwordResetToken: tokenHash }).select(
@@ -237,6 +347,14 @@ export async function resetPassword(rawToken: string, newPassword: string): Prom
   );
 
   if (!user || !user.passwordResetExpires || user.passwordResetExpires.getTime() <= Date.now()) {
+    await logActivity({
+      action: "PASSWORD_RESET",
+      module: "AUTH",
+      description: "Password reset failed — invalid or expired reset token.",
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
     throw new AppError(400, "This password reset link is invalid or has expired.");
   }
 
@@ -247,6 +365,16 @@ export async function resetPassword(rawToken: string, newPassword: string): Prom
   await user.save();
 
   await revokeAllRefreshTokensForUser(user._id);
+
+  await logActivity({
+    user: user._id,
+    action: "PASSWORD_RESET",
+    module: "AUTH",
+    description: "Password reset successfully.",
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
 
   void sendPasswordResetConfirmationEmail(user.email, user.fullname).catch((error: unknown) =>
     console.error("[email] failed to send password reset confirmation email:", error)

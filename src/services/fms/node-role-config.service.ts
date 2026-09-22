@@ -1,6 +1,7 @@
 import { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
 import { recordAudit } from "../../utils/fms/audit-log";
+import { logActivity } from "../../utils/activity-log";
 import { OrganizationNodeModel } from "../../models/OrganizationNode";
 import {
   FmsNodeRoleConfigModel,
@@ -25,11 +26,17 @@ async function assertNodeExistsAndActive(nodeId: string) {
   return node;
 }
 
+interface ActorContext {
+  ipAddress: string | null;
+  userAgent?: string | null;
+}
+
 export async function createConfig(
   input: CreateNodeRoleConfigInput,
   actorId: Types.ObjectId,
-  ipAddress: string | null
+  context: ActorContext
 ): Promise<FmsNodeRoleConfigDocument> {
+  const { ipAddress } = context;
   await assertNodeExistsAndActive(input.node);
 
   const existing = await FmsNodeRoleConfigModel.findOne({ node: input.node });
@@ -58,6 +65,17 @@ export async function createConfig(
     ipAddress,
   });
 
+  await logActivity({
+    user: actorId,
+    action: "ROLE_CONFIGURATION_CHANGED",
+    module: "FMS_CONFIG",
+    description: "Node role configuration created.",
+    entityType: "FmsNodeRoleConfig",
+    entityId: created._id,
+    ipAddress,
+    userAgent: context.userAgent,
+  });
+
   return created;
 }
 
@@ -65,8 +83,9 @@ export async function updateConfig(
   nodeId: string,
   input: UpdateNodeRoleConfigInput,
   actorId: Types.ObjectId,
-  ipAddress: string | null
+  context: ActorContext
 ): Promise<FmsNodeRoleConfigDocument> {
+  const { ipAddress } = context;
   const config = await FmsNodeRoleConfigModel.findOne({ node: nodeId });
   if (!config) {
     throw new AppError(404, "No role configuration exists for this node yet.");
@@ -90,6 +109,17 @@ export async function updateConfig(
     previousValue,
     newValue: config.toObject(),
     ipAddress,
+  });
+
+  await logActivity({
+    user: actorId,
+    action: "ROLE_CONFIGURATION_CHANGED",
+    module: "FMS_CONFIG",
+    description: "Node role configuration updated.",
+    entityType: "FmsNodeRoleConfig",
+    entityId: config._id,
+    ipAddress,
+    userAgent: context.userAgent,
   });
 
   return config;

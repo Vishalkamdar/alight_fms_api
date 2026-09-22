@@ -1,6 +1,7 @@
 import { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
 import { recordAudit } from "../../utils/fms/audit-log";
+import { logActivity } from "../../utils/activity-log";
 import { hashPassword } from "../../utils/password";
 import { revokeAllRefreshTokensForUser } from "../../utils/refreshToken";
 import { sendWelcomeEmail } from "../email.service";
@@ -35,6 +36,7 @@ export interface RequestContext {
   actorId: Types.ObjectId;
   actorRole: UserRole;
   ipAddress: string | null;
+  userAgent?: string | null;
 }
 
 export async function createUser(input: CreateUserInput, context: RequestContext) {
@@ -75,6 +77,17 @@ export async function createUser(input: CreateUserInput, context: RequestContext
     entityId: user._id,
     newValue: toSafeUser(user),
     ipAddress: context.ipAddress,
+  });
+
+  await logActivity({
+    user: context.actorId,
+    action: "USER_CREATED",
+    module: "USER",
+    description: `Created user ${user.email} with role ${role}.`,
+    entityType: "User",
+    entityId: user._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
   });
 
   void sendWelcomeEmail(user.email, user.fullname).catch((error: unknown) =>
@@ -155,6 +168,20 @@ export async function updateUser(id: string, input: UpdateUserInput, context: Re
     ipAddress: context.ipAddress,
   });
 
+  const roleChanged = input.role !== undefined && previousValue.role !== user.role;
+  await logActivity({
+    user: context.actorId,
+    action: roleChanged ? "USER_ROLE_CHANGED" : "USER_UPDATED",
+    module: "USER",
+    description: roleChanged
+      ? `Changed ${user.email}'s role from ${previousValue.role} to ${user.role}.`
+      : `Updated user ${user.email}.`,
+    entityType: "User",
+    entityId: user._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
   return toSafeUser(user);
 }
 
@@ -189,6 +216,17 @@ export async function updateUserStatus(id: string, isActive: boolean, context: R
     previousValue,
     newValue: toSafeUser(user),
     ipAddress: context.ipAddress,
+  });
+
+  await logActivity({
+    user: context.actorId,
+    action: isActive ? "ACCOUNT_ACTIVATED" : "ACCOUNT_DEACTIVATED",
+    module: "USER",
+    description: `${isActive ? "Activated" : "Deactivated"} user ${user.email}.`,
+    entityType: "User",
+    entityId: user._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
   });
 
   return toSafeUser(user);

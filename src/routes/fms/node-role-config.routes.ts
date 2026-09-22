@@ -29,16 +29,14 @@ router.put(
   controller.updateNodeRoleConfig
 );
 
-// Admin needs read access to know what roles are assignable where.
-router.get(
-  "/",
-  authorizeRoles("Super Admin", "Admin"),
-  validate(nodeRoleConfigListQuerySchema, "query"),
-  controller.listNodeRoleConfigs
-);
+// Admin and FMS Operational Roles Manager need read access to know what
+// roles are assignable where — configuring them stays Super Admin-only above.
+const canRead = authorizeRoles("Super Admin", "Admin", "FMS Operational Roles Manager");
+
+router.get("/", canRead, validate(nodeRoleConfigListQuerySchema, "query"), controller.listNodeRoleConfigs);
 router.get(
   "/:nodeId",
-  authorizeRoles("Super Admin", "Admin"),
+  canRead,
   validate(nodeIdRouteParamsSchema, "params"),
   controller.getNodeRoleConfig
 );

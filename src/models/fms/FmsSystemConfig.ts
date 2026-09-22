@@ -13,6 +13,8 @@ export interface FmsSystemConfigDocument extends Document {
   logoUrl: string | null;
   primaryColor: string;
   secondaryColor: string;
+  /** Activity log retention window in days. 0 means keep indefinitely. */
+  activityLogRetentionDays: number;
   updatedBy: Types.ObjectId | null;
   createdAt: Date;
   updatedAt: Date;
@@ -25,6 +27,7 @@ const fmsSystemConfigSchema = new Schema<FmsSystemConfigDocument>(
     logoUrl: { type: String, default: null },
     primaryColor: { type: String, required: true, default: "#C92026" },
     secondaryColor: { type: String, required: true, default: "#223579" },
+    activityLogRetentionDays: { type: Number, required: true, default: 0, min: 0, max: 3650 },
     updatedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
   },
   { timestamps: true }

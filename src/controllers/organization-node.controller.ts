@@ -4,6 +4,10 @@ import { NodeTypeModel } from "../models/NodeType";
 import { OrganizationNodeModel, OrganizationNodeDocument } from "../models/OrganizationNode";
 import { AppError } from "../utils/AppError";
 import { sendSuccess } from "../utils/apiResponse";
+import { logActivity } from "../utils/activity-log";
+import { getActorContext } from "../utils/requestContext";
+import { uploadCsv } from "../utils/fms/upload";
+import { bulkImportOrganizationNodes as runBulkImport } from "../services/organization-node-bulk-import.service";
 import type { AuthenticatedRequest } from "../middleware/auth";
 import type {
   CreateOrganizationNodeInput,
@@ -197,6 +201,17 @@ export async function createOrganizationNode(
     updatedBy: req.user?._id ?? null,
   });
 
+  await logActivity({
+    user: req.user?._id ?? null,
+    action: "NODE_CREATED",
+    module: "FMS_CONFIG",
+    description: `Created organization node "${node.name}".`,
+    entityType: "OrganizationNode",
+    entityId: node._id,
+    ipAddress: req.ip ?? null,
+    userAgent: req.headers["user-agent"] ?? null,
+  });
+
   const { nodeTypeMap, nodeMap } = await buildLookupMaps();
   sendSuccess(res, serializeNode(node, nodeTypeMap, nodeMap), {
     statusCode: 201,
@@ -220,6 +235,17 @@ export async function updateOrganizationNode(
   node.updatedBy = req.user?._id ?? null;
   await node.save();
 
+  await logActivity({
+    user: req.user?._id ?? null,
+    action: "NODE_UPDATED",
+    module: "FMS_CONFIG",
+    description: `Updated organization node "${node.name}".`,
+    entityType: "OrganizationNode",
+    entityId: node._id,
+    ipAddress: req.ip ?? null,
+    userAgent: req.headers["user-agent"] ?? null,
+  });
+
   const { nodeTypeMap, nodeMap } = await buildLookupMaps();
   sendSuccess(res, serializeNode(node, nodeTypeMap, nodeMap), { message: "Node updated." });
 }
@@ -235,6 +261,17 @@ export async function updateOrganizationNodeStatus(
   node.status = status;
   node.updatedBy = req.user?._id ?? null;
   await node.save();
+
+  await logActivity({
+    user: req.user?._id ?? null,
+    action: status === "Inactive" ? "NODE_DEACTIVATED" : "NODE_UPDATED",
+    module: "FMS_CONFIG",
+    description: `Set organization node "${node.name}" status to ${status}.`,
+    entityType: "OrganizationNode",
+    entityId: node._id,
+    ipAddress: req.ip ?? null,
+    userAgent: req.headers["user-agent"] ?? null,
+  });
 
   const { nodeTypeMap, nodeMap } = await buildLookupMaps();
   sendSuccess(res, serializeNode(node, nodeTypeMap, nodeMap));
@@ -271,7 +308,7 @@ export async function reorderOrganizationNode(
   sendSuccess(res, serializeNode(node, nodeTypeMap, nodeMap));
 }
 
-export async function deleteOrganizationNode(_req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function deleteOrganizationNode(req: AuthenticatedRequest, res: Response): Promise<void> {
   const { id } = res.locals.params as { id: string };
   const node = await findNodeOr404(id);
 
@@ -289,5 +326,52 @@ export async function deleteOrganizationNode(_req: AuthenticatedRequest, res: Re
   // modules ship, before deletion is ever allowed to proceed.
 
   await node.deleteOne();
+
+  await logActivity({
+    user: req.user?._id ?? null,
+    action: "NODE_DEACTIVATED",
+    module: "FMS_CONFIG",
+    description: `Deleted unreferenced organization node "${node.name}".`,
+    entityType: "OrganizationNode",
+    entityId: node._id,
+    ipAddress: req.ip ?? null,
+    userAgent: req.headers["user-agent"] ?? null,
+  });
+
   sendSuccess(res, null, { message: "Node deleted." });
+}
+
+export async function bulkImportOrganizationNodes(
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    uploadCsv(req, res, (err: unknown) => {
+      if (err) {
+        reject(new AppError(400, err instanceof Error ? err.message : "Failed to read the CSV file."));
+        return;
+      }
+      resolve();
+    });
+  });
+
+  if (!req.file) {
+    throw new AppError(400, "A CSV file is required.");
+  }
+
+  const dryRun = req.query.commit !== "true";
+  const context = getActorContext(req);
+
+  const result = await runBulkImport(
+    req.file.buffer,
+    context.actorId,
+    { ipAddress: context.ipAddress, userAgent: context.userAgent, fileName: req.file.originalname },
+    dryRun
+  );
+
+  sendSuccess(res, result, {
+    message: dryRun
+      ? "Preview generated — nothing has been imported yet."
+      : `Import complete — ${result.summary.created} created, ${result.summary.skipped} skipped, ${result.summary.failed} failed.`,
+  });
 }

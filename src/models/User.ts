@@ -3,8 +3,14 @@ import { Schema, model, Document, Types } from "mongoose";
 /**
  * Application-level roles only. FMS operational roles (Maker/Verifier/
  * Checker) are never stored here — see models/fms/FmsUserNodeRole.ts.
+ *
+ * "FMS Operational Roles Manager" is a lesser-privileged third tier: it can
+ * assign/remove Maker/Verifier/Checker node-role assignments (and view the
+ * user list to do so) without the full user-management or master-data
+ * permissions Admin/Super Admin carry. See users.routes.ts and
+ * fms/user-node-role.routes.ts for exactly what it can reach.
  */
-export const USER_ROLES = ["Super Admin", "Admin"] as const;
+export const USER_ROLES = ["Super Admin", "Admin", "FMS Operational Roles Manager"] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
 export const DEFAULT_USER_ROLE: UserRole = "Admin";

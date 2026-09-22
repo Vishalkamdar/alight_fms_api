@@ -43,35 +43,35 @@ export async function refreshToken(req: AuthenticatedRequest, res: Response): Pr
   sendSuccess(res, result, { message: "Token refreshed." });
 }
 
-export async function logout(_req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function logout(req: AuthenticatedRequest, res: Response): Promise<void> {
   const { refreshToken: rawToken } = res.locals.body as RefreshTokenInput;
-  await authService.logout(rawToken);
+  await authService.logout(rawToken, requestContext(req));
   sendSuccess(res, null, { message: "Logged out." });
 }
 
 export async function logoutAll(req: AuthenticatedRequest, res: Response): Promise<void> {
   if (!req.user) throw new AppError(401, "Authentication required.");
-  await authService.logoutAll(req.user._id as Types.ObjectId);
+  await authService.logoutAll(req.user._id as Types.ObjectId, requestContext(req));
   sendSuccess(res, null, { message: "Logged out from all devices." });
 }
 
 export async function changePassword(req: AuthenticatedRequest, res: Response): Promise<void> {
   if (!req.user) throw new AppError(401, "Authentication required.");
   const { currentPassword, newPassword } = res.locals.body as ChangePasswordInput;
-  await authService.changePassword(req.user, currentPassword, newPassword);
+  await authService.changePassword(req.user, currentPassword, newPassword, requestContext(req));
   sendSuccess(res, null, { message: "Password changed successfully." });
 }
 
-export async function forgotPassword(_req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function forgotPassword(req: AuthenticatedRequest, res: Response): Promise<void> {
   const { email } = res.locals.body as ForgotPasswordInput;
-  await authService.forgotPassword(email);
+  await authService.forgotPassword(email, requestContext(req));
   sendSuccess(res, null, {
     message: "If an account with that email exists, a password reset link has been sent.",
   });
 }
 
-export async function resetPassword(_req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function resetPassword(req: AuthenticatedRequest, res: Response): Promise<void> {
   const { token, password } = res.locals.body as ResetPasswordInput;
-  await authService.resetPassword(token, password);
+  await authService.resetPassword(token, password, requestContext(req));
   sendSuccess(res, null, { message: "Password reset successfully." });
 }
