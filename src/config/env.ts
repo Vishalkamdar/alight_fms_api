@@ -20,18 +20,6 @@ const envSchema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
   SMTP_FROM: z.string().default("Alight FMS <no-reply@alight-fms.local>"),
-
-  SEED_ADMIN_NAME: z.string().optional(),
-  SEED_ADMIN_EMAIL: z.string().optional(),
-  SEED_ADMIN_PASSWORD: z.string().optional(),
-  SEED_ADMIN_COUNTRY_CODE: z.string().optional(),
-  SEED_ADMIN_PHONE: z.string().optional(),
-
-  SUPER_ADMIN_NAME: z.string().optional(),
-  SUPER_ADMIN_EMAIL: z.string().default("vishal.kamdar@alightconsultants.in"),
-  SUPER_ADMIN_PASSWORD: z.string().optional(),
-  SUPER_ADMIN_COUNTRY_CODE: z.string().optional(),
-  SUPER_ADMIN_PHONE: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
