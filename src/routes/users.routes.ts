@@ -15,9 +15,9 @@ const router = Router();
 
 router.use(authenticate);
 
-// FMS Operational Roles Manager needs read access to find who to assign
-// node roles to, but cannot create/edit/activate/deactivate accounts.
-const canRead = authorizeRoles("Super Admin", "Admin", "FMS Operational Roles Manager");
+// Manage Users is Super Admin + Admin only — FMS Operational User has no
+// access to this menu at all.
+const canRead = authorizeRoles("Super Admin", "Admin");
 const canWrite = authorizeRoles("Super Admin", "Admin");
 
 router.get("/", canRead, validate(userListQuerySchema, "query"), controller.listUsers);

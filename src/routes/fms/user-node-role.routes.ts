@@ -26,10 +26,9 @@ router.get(
   controller.getMyNodeRole
 );
 
-// Admin-managed FMS role assignments — this is FMS Operational Roles
-// Manager's entire purpose, so it gets full read/write here (unlike
-// users.routes.ts, where it's read-only).
-const canManageAssignments = authorizeRoles("Admin", "Super Admin", "FMS Operational Roles Manager");
+// Assigning Maker/Verifier/Checker node roles is part of Approval Roles, a
+// Master Setup submenu — Super Admin only.
+const canManageAssignments = authorizeRoles("Super Admin");
 
 router.post(
   "/user-node-roles",

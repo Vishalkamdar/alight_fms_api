@@ -22,17 +22,18 @@ const router = Router();
 
 router.use(authenticate);
 
-// Master Setup is Super Admin-only system configuration; Admin gets
-// read-only access so they can browse the hierarchy while assigning users.
+// Node Types / Labels is a Master Setup submenu — Super Admin only, no
+// exceptions (unlike Organization Nodes/Scheme-Head Nodes/Financial Years,
+// nothing outside Master Setup reads this list).
 router.get(
   "/",
-  authorizeRoles("Super Admin", "Admin"),
+  authorizeRoles("Super Admin"),
   validate(nodeTypeListQuerySchema, "query"),
   listNodeTypes
 );
 router.get(
   "/:id",
-  authorizeRoles("Super Admin", "Admin"),
+  authorizeRoles("Super Admin"),
   validate(objectIdParamsSchema, "params"),
   getNodeType
 );

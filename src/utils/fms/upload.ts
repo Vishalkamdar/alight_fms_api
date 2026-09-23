@@ -59,3 +59,74 @@ export const uploadCsv = multer({
     callback(null, true);
   },
 }).single("file");
+
+/**
+ * Disk storage for Budget Setup supporting documents (sanction letters,
+ * approval memos, etc.) — served statically the same way as branding assets.
+ */
+const BUDGET_DOCUMENTS_DIR = path.join(UPLOAD_ROOT_DIR, "budget-setups");
+fs.mkdirSync(BUDGET_DOCUMENTS_DIR, { recursive: true });
+
+const ALLOWED_DOCUMENT_MIME_TYPES = new Set([
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+const ALLOWED_DOCUMENT_EXTENSIONS = new Set([".pdf", ".doc", ".docx"]);
+const MAX_DOCUMENT_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+
+const budgetDocumentStorage = multer.diskStorage({
+  destination: (_req, _file, callback) => {
+    callback(null, BUDGET_DOCUMENTS_DIR);
+  },
+  filename: (_req, file, callback) => {
+    const uniqueSuffix = crypto.randomBytes(8).toString("hex");
+    const extension = path.extname(file.originalname).toLowerCase() || ".pdf";
+    callback(null, `doc-${Date.now()}-${uniqueSuffix}${extension}`);
+  },
+});
+
+export const uploadBudgetDocument = multer({
+  storage: budgetDocumentStorage,
+  limits: { fileSize: MAX_DOCUMENT_SIZE_BYTES },
+  fileFilter: (_req, file, callback) => {
+    const extension = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_DOCUMENT_MIME_TYPES.has(file.mimetype) && !ALLOWED_DOCUMENT_EXTENSIONS.has(extension)) {
+      callback(new Error("Only PDF, DOC, or DOCX files are allowed."));
+      return;
+    }
+    callback(null, true);
+  },
+}).single("document");
+
+/**
+ * Disk storage for Budget Allocation reference documents (the same file
+ * type/size constraints as Budget Setup's documents, kept in its own
+ * directory so the two modules' uploads never collide by filename).
+ */
+const BUDGET_ALLOCATION_DOCUMENTS_DIR = path.join(UPLOAD_ROOT_DIR, "budget-allocations");
+fs.mkdirSync(BUDGET_ALLOCATION_DOCUMENTS_DIR, { recursive: true });
+
+const budgetAllocationDocumentStorage = multer.diskStorage({
+  destination: (_req, _file, callback) => {
+    callback(null, BUDGET_ALLOCATION_DOCUMENTS_DIR);
+  },
+  filename: (_req, file, callback) => {
+    const uniqueSuffix = crypto.randomBytes(8).toString("hex");
+    const extension = path.extname(file.originalname).toLowerCase() || ".pdf";
+    callback(null, `doc-${Date.now()}-${uniqueSuffix}${extension}`);
+  },
+});
+
+export const uploadBudgetAllocationDocument = multer({
+  storage: budgetAllocationDocumentStorage,
+  limits: { fileSize: MAX_DOCUMENT_SIZE_BYTES },
+  fileFilter: (_req, file, callback) => {
+    const extension = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_DOCUMENT_MIME_TYPES.has(file.mimetype) && !ALLOWED_DOCUMENT_EXTENSIONS.has(extension)) {
+      callback(new Error("Only PDF, DOC, or DOCX files are allowed."));
+      return;
+    }
+    callback(null, true);
+  },
+}).single("document");

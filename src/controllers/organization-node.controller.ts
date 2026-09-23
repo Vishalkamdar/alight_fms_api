@@ -7,10 +7,12 @@ import { sendSuccess } from "../utils/apiResponse";
 import { logActivity } from "../utils/activity-log";
 import { getActorContext } from "../utils/requestContext";
 import { uploadCsv } from "../utils/fms/upload";
+import { toCsvRow } from "../utils/csv";
 import { bulkImportOrganizationNodes as runBulkImport } from "../services/organization-node-bulk-import.service";
 import type { AuthenticatedRequest } from "../middleware/auth";
 import type {
   CreateOrganizationNodeInput,
+  OrganizationNodeExportQuery,
   OrganizationNodeListQuery,
   UpdateOrganizationNodeInput,
 } from "../schemas/organization-node.schema";
@@ -151,6 +153,51 @@ export async function listOrganizationNodes(
   sendSuccess(res, items, {
     meta: { page, limit, total, totalPages: Math.max(Math.ceil(total / limit), 1) },
   });
+}
+
+const CSV_HEADER = ["Name", "Node Type", "Parent Node", "Status", "Display Order", "Created At"];
+
+/**
+ * Streams the CSV row-by-row from a cursor instead of loading the full
+ * matching set into memory — lookup maps (node types + all node names) are
+ * small, bounded master data, loaded once up front, then reused per row.
+ */
+export async function exportOrganizationNodes(_req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { search, status, nodeTypeId, sortBy, sortOrder } = res.locals.query as OrganizationNodeExportQuery;
+
+  const filter: Record<string, unknown> = {};
+  if (status) filter.status = status;
+  if (nodeTypeId) filter.nodeTypeId = nodeTypeId;
+  if (search) filter.name = { $regex: search, $options: "i" };
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="organization-nodes-${new Date().toISOString().slice(0, 10)}.csv"`
+  );
+  res.write(toCsvRow(CSV_HEADER));
+
+  const { nodeTypeMap, nodeMap } = await buildLookupMaps();
+  const cursor = OrganizationNodeModel.find(filter)
+    .sort({ [sortBy]: sortOrder === "asc" ? 1 : -1 })
+    .lean()
+    .cursor();
+
+  for await (const doc of cursor) {
+    const parentId = doc.parentNodeId ? String(doc.parentNodeId) : null;
+    res.write(
+      toCsvRow([
+        doc.name,
+        nodeTypeMap.get(String(doc.nodeTypeId))?.name ?? "",
+        parentId ? (nodeMap.get(parentId)?.name ?? "") : "Root",
+        doc.status,
+        doc.displayOrder,
+        new Date(doc.createdAt).toISOString(),
+      ])
+    );
+  }
+
+  res.end();
 }
 
 export async function getOrganizationTree(_req: AuthenticatedRequest, res: Response): Promise<void> {

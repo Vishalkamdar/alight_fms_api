@@ -29,9 +29,9 @@ router.put(
   controller.updateNodeRoleConfig
 );
 
-// Admin and FMS Operational Roles Manager need read access to know what
-// roles are assignable where — configuring them stays Super Admin-only above.
-const canRead = authorizeRoles("Super Admin", "Admin", "FMS Operational Roles Manager");
+// Approval Roles is a Master Setup submenu — Super Admin only end to end,
+// read included (its only consumer is the Master Setup > Approval Roles page).
+const canRead = authorizeRoles("Super Admin");
 
 router.get("/", canRead, validate(nodeRoleConfigListQuerySchema, "query"), controller.listNodeRoleConfigs);
 router.get(

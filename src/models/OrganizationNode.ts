@@ -30,6 +30,10 @@ const organizationNodeSchema = new Schema<OrganizationNodeDocument>(
 
 organizationNodeSchema.index({ parentNodeId: 1 });
 organizationNodeSchema.index({ nodeTypeId: 1 });
+organizationNodeSchema.index({ status: 1 });
+// Default listing sort (displayOrder asc) and the "latest first" alternative.
+organizationNodeSchema.index({ displayOrder: 1 });
+organizationNodeSchema.index({ createdAt: -1 });
 
 export const OrganizationNodeModel = model<OrganizationNodeDocument>(
   "OrganizationNode",

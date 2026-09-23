@@ -6,6 +6,7 @@ import { objectIdParamsSchema } from "../schemas/common.schema";
 import {
   createOrganizationNodeSchema,
   moveOrganizationNodeSchema,
+  organizationNodeExportQuerySchema,
   organizationNodeListQuerySchema,
   reorderOrganizationNodeSchema,
   updateOrganizationNodeSchema,
@@ -15,6 +16,7 @@ import {
   bulkImportOrganizationNodes,
   createOrganizationNode,
   deleteOrganizationNode,
+  exportOrganizationNodes,
   getOrganizationNode,
   getOrganizationTree,
   listOrganizationNodes,
@@ -28,15 +30,22 @@ const router = Router();
 
 router.use(authenticate);
 
-// Master Setup / hierarchy configuration is Super Admin-only; Admin and FMS
-// Operational Roles Manager get read-only access so they can pick nodes
-// while assigning users to Maker/Verifier/Checker roles.
-const canRead = authorizeRoles("Super Admin", "Admin", "FMS Operational Roles Manager");
+// Writing the hierarchy (Master Setup > Organization Nodes) is Super
+// Admin-only. Admin keeps read access because the Organization Tree menu
+// item and every Budget Management node picker depend on it; FMS
+// Operational User has no access to either, so it's excluded from read too.
+const canRead = authorizeRoles("Super Admin", "Admin");
 const canWrite = authorizeRoles("Super Admin");
 
 // Must be registered before "/:id" so these static segments aren't captured as an id.
 router.get("/tree", canRead, getOrganizationTree);
 router.post("/bulk-import", canWrite, bulkImportOrganizationNodes);
+router.get(
+  "/export",
+  canRead,
+  validate(organizationNodeExportQuerySchema, "query"),
+  exportOrganizationNodes
+);
 
 router.get("/", canRead, validate(organizationNodeListQuerySchema, "query"), listOrganizationNodes);
 router.post("/", canWrite, validate(createOrganizationNodeSchema, "body"), createOrganizationNode);

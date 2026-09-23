@@ -7,8 +7,9 @@ import { listActivityLogs } from "../controllers/activity-log.controller";
 
 const router = Router();
 
-// Security logs — Super Admin only.
-router.use(authenticate, authorizeRoles("Super Admin"));
+// Security logs — Super Admin and Admin (not Master Setup; Admin keeps this
+// per the FMS menu access matrix).
+router.use(authenticate, authorizeRoles("Super Admin", "Admin"));
 
 router.get("/", validate(activityLogListQuerySchema, "query"), listActivityLogs);
 

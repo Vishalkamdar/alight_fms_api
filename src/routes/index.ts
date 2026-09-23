@@ -11,6 +11,9 @@ import configurationRoutes from "./fms/configuration.routes";
 import otpProviderRoutes from "./fms/otp-provider.routes";
 import actionOtpRoutes from "./fms/action-otp.routes";
 import financialYearRoutes from "./fms/financial-year.routes";
+import budgetSetupRoutes from "./fms/budget-setup.routes";
+import budgetAllocationRoutes from "./fms/budget-allocation.routes";
+import approvalsRoutes from "./fms/approvals.routes";
 import activityLogRoutes from "./activity-log.routes";
 
 const router = Router();
@@ -27,6 +30,9 @@ router.use("/fms/configuration", configurationRoutes);
 router.use("/fms/otp-providers", otpProviderRoutes);
 router.use("/fms/otp", actionOtpRoutes);
 router.use("/fms/financial-years", financialYearRoutes);
+router.use("/fms/budget-setups", budgetSetupRoutes);
+router.use("/fms/budget-allocations", budgetAllocationRoutes);
+router.use("/fms/approvals", approvalsRoutes);
 // Exposes /fms/user-node-roles, /fms/users/:userId/nodes, /fms/nodes/:nodeId/users,
 // /fms/my-nodes, and /fms/my-nodes/:nodeId/role.
 router.use("/fms", userNodeRoleRoutes);
