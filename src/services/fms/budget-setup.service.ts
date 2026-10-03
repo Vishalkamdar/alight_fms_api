@@ -710,21 +710,31 @@ export async function verifyBudgetSetup(
     doc.approvedAt = new Date();
   }
   doc.updatedBy = actorId;
-  await doc.save();
 
-  await recordWorkflowEvent(
-    { module: "BUDGET_SETUP", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.originalAmount },
-    {
-      action: "VERIFIER_VERIFIED",
-      userId: actorId,
-      userRole: "Verifier",
-      previousStatus,
-      newStatus: nextStatus,
-      holdingAmount: doc.holdingAmount,
-      remarks: input.remarks,
-      ipAddress: context.ipAddress,
-    }
-  );
+  // The status flip and its workflow-history record are two documents —
+  // one MongoDB transaction keeps them consistent (GLOBAL_RULES §8).
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await doc.save({ session });
+      await recordWorkflowEvent(
+        { module: "BUDGET_SETUP", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.originalAmount },
+        {
+          action: "VERIFIER_VERIFIED",
+          userId: actorId,
+          userRole: "Verifier",
+          previousStatus,
+          newStatus: nextStatus,
+          holdingAmount: doc.holdingAmount,
+          remarks: input.remarks,
+          ipAddress: context.ipAddress,
+        },
+        session
+      );
+    });
+  } finally {
+    await session.endSession();
+  }
 
   await logActivity({
     user: actorId,
@@ -765,21 +775,29 @@ export async function approveBudgetSetup(
   doc.transferredAmount = doc.originalAmount;
   doc.approvedAt = new Date();
   doc.updatedBy = actorId;
-  await doc.save();
 
-  await recordWorkflowEvent(
-    { module: "BUDGET_SETUP", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.originalAmount },
-    {
-      action: "CHECKER_APPROVED",
-      userId: actorId,
-      userRole: "Checker",
-      previousStatus,
-      newStatus: "APPROVED",
-      holdingAmount: 0,
-      remarks: input.remarks,
-      ipAddress: context.ipAddress,
-    }
-  );
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await doc.save({ session });
+      await recordWorkflowEvent(
+        { module: "BUDGET_SETUP", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.originalAmount },
+        {
+          action: "CHECKER_APPROVED",
+          userId: actorId,
+          userRole: "Checker",
+          previousStatus,
+          newStatus: "APPROVED",
+          holdingAmount: 0,
+          remarks: input.remarks,
+          ipAddress: context.ipAddress,
+        },
+        session
+      );
+    });
+  } finally {
+    await session.endSession();
+  }
 
   await logActivity({
     user: actorId,
@@ -831,21 +849,29 @@ export async function rejectBudgetSetup(
   if (isVerifierStage) doc.verifierId = actorId;
   else doc.checkerId = actorId;
   doc.updatedBy = actorId;
-  await doc.save();
 
-  await recordWorkflowEvent(
-    { module: "BUDGET_SETUP", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.originalAmount },
-    {
-      action: isVerifierStage ? "VERIFIER_REJECTED" : "CHECKER_REJECTED",
-      userId: actorId,
-      userRole: isVerifierStage ? "Verifier" : "Checker",
-      previousStatus,
-      newStatus: doc.approvalStatus,
-      holdingAmount: 0,
-      remarks: input.reason,
-      ipAddress: context.ipAddress,
-    }
-  );
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await doc.save({ session });
+      await recordWorkflowEvent(
+        { module: "BUDGET_SETUP", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.originalAmount },
+        {
+          action: isVerifierStage ? "VERIFIER_REJECTED" : "CHECKER_REJECTED",
+          userId: actorId,
+          userRole: isVerifierStage ? "Verifier" : "Checker",
+          previousStatus,
+          newStatus: doc.approvalStatus,
+          holdingAmount: 0,
+          remarks: input.reason,
+          ipAddress: context.ipAddress,
+        },
+        session
+      );
+    });
+  } finally {
+    await session.endSession();
+  }
 
   await logActivity({
     user: actorId,
@@ -922,7 +948,8 @@ export async function getAvailableBudget(budgetSetupId: string): Promise<Availab
 export async function reserveBudgetAmount(
   budgetSetupId: string,
   amount: number,
-  context: ActorContext
+  context: ActorContext,
+  session?: mongoose.ClientSession
 ): Promise<AvailableBudgetDto> {
   if (amount <= 0) throw new AppError(400, "Amount to reserve must be greater than 0.");
 
@@ -933,11 +960,11 @@ export async function reserveBudgetAmount(
       $expr: { $lte: [{ $add: ["$allocatedAmount", amount] }, "$originalAmount"] },
     },
     { $inc: { allocatedAmount: amount }, $set: { updatedBy: context.actorId } },
-    { returnDocument: "after" }
+    { returnDocument: "after", session }
   );
 
   if (!updated) {
-    const existing = await BudgetSetupModel.findById(budgetSetupId);
+    const existing = await BudgetSetupModel.findById(budgetSetupId).session(session ?? null);
     if (!existing) throw new AppError(404, "Budget Setup not found.");
     if (existing.status !== "Active") throw new AppError(422, "This Budget Setup is inactive.");
     throw new AppError(409, "Requested amount exceeds the remaining budget.", {
@@ -969,18 +996,20 @@ export async function reserveBudgetAmount(
 export async function releaseBudgetAmount(
   budgetSetupId: string,
   amount: number,
-  context: ActorContext
+  context: ActorContext,
+  session?: mongoose.ClientSession
 ): Promise<AvailableBudgetDto> {
   if (amount <= 0) throw new AppError(400, "Amount to release must be greater than 0.");
 
   const updated = await BudgetSetupModel.findOneAndUpdate(
     { _id: budgetSetupId, $expr: { $gte: ["$allocatedAmount", amount] } },
     { $inc: { allocatedAmount: -amount }, $set: { updatedBy: context.actorId } },
-    { returnDocument: "after" }
+    { returnDocument: "after", session }
   );
 
   if (!updated) {
-    const existing = await findByIdOr404(budgetSetupId);
+    const existing = await BudgetSetupModel.findById(budgetSetupId).session(session ?? null);
+    if (!existing) throw new AppError(404, "Budget Setup not found.");
     throw new AppError(
       409,
       `Cannot release ${amount} — only ${existing.allocatedAmount} is currently allocated.`

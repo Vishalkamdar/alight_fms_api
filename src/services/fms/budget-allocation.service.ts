@@ -18,11 +18,14 @@ import {
   resolveWorkflowForNode,
   recordWorkflowEvent,
   getMyActionableNodeIds,
+  getAllowedNodeIdsForList,
   type ApprovalStatus,
   type WorkflowSnapshot,
   type ActorForPermission,
 } from "./financial-workflow.service";
-import type { UserRole } from "../../models/User";
+import { NodeTypeModel } from "../../models/NodeType";
+import { UserModel, type UserRole } from "../../models/User";
+import type { FmsRole } from "../../models/fms/FmsUserNodeRole";
 import type {
   BudgetAllocationExportQuery,
   BudgetAllocationListQuery,
@@ -57,6 +60,11 @@ interface FinancialYearRef {
   financialYear: string;
 }
 
+interface UserRef {
+  _id: string;
+  fullname: string;
+}
+
 export interface BudgetAllocationAttachmentDto {
   _id: string;
   originalName: string;
@@ -88,6 +96,7 @@ export interface BudgetAllocationDto {
   approvalStatus: ApprovalStatus;
   workflowSnapshot: WorkflowSnapshot;
   makerId: string | null;
+  maker: UserRef | null;
   verifierId: string | null;
   checkerId: string | null;
   holdingAmount: number;
@@ -112,10 +121,11 @@ export interface ListResult<T> {
 }
 
 async function buildLookupMaps() {
-  const [orgNodes, schemeHeadNodes, financialYears] = await Promise.all([
+  const [orgNodes, schemeHeadNodes, financialYears, makers] = await Promise.all([
     OrganizationNodeModel.find().select("name").lean(),
     SchemeHeadNodeModel.find().select("name").lean(),
     FinancialYearModel.find().select("financialYear").lean(),
+    UserModel.find().select("fullname").lean(),
   ]);
 
   return {
@@ -127,6 +137,9 @@ async function buildLookupMaps() {
     ),
     financialYearMap: new Map<string, FinancialYearRef>(
       financialYears.map((y) => [String(y._id), { _id: String(y._id), financialYear: y.financialYear }])
+    ),
+    makerMap: new Map<string, UserRef>(
+      makers.map((u) => [String(u._id), { _id: String(u._id), fullname: u.fullname }])
     ),
   };
 }
@@ -158,6 +171,7 @@ function serialize(
   const financialYearId = String(doc.financialYearId);
   const organizationNodeId = String(doc.organizationNodeId);
   const headId = doc.headId ? String(doc.headId) : null;
+  const makerId = doc.makerId ? String(doc.makerId) : null;
 
   return {
     _id: String(doc._id),
@@ -174,7 +188,8 @@ function serialize(
     sourcePools: serializeSourcePools(doc.sourcePools),
     approvalStatus: doc.approvalStatus,
     workflowSnapshot: doc.workflowSnapshot,
-    makerId: doc.makerId ? String(doc.makerId) : null,
+    makerId,
+    maker: makerId ? (maps.makerMap.get(makerId) ?? null) : null,
     verifierId: doc.verifierId ? String(doc.verifierId) : null,
     checkerId: doc.checkerId ? String(doc.checkerId) : null,
     holdingAmount: doc.holdingAmount,
@@ -280,6 +295,7 @@ const SORT_FIELD_MAP: Record<string, string> = {
   organizationNode: "organizationNode.name",
   head: "head.name",
   financialYear: "financialYear.financialYear",
+  maker: "maker.fullname",
 };
 
 interface AggregatedBudgetAllocationRow {
@@ -298,6 +314,7 @@ interface AggregatedBudgetAllocationRow {
   approvalStatus: ApprovalStatus;
   workflowSnapshot: WorkflowSnapshot;
   makerId: Types.ObjectId | null;
+  maker: { _id: Types.ObjectId; fullname: string } | null;
   verifierId: Types.ObjectId | null;
   checkerId: Types.ObjectId | null;
   holdingAmount: number;
@@ -348,6 +365,7 @@ function serializeAggregatedRow(row: AggregatedBudgetAllocationRow): BudgetAlloc
     approvalStatus: row.approvalStatus,
     workflowSnapshot: row.workflowSnapshot,
     makerId: row.makerId ? String(row.makerId) : null,
+    maker: row.maker ? { _id: String(row.maker._id), fullname: row.maker.fullname } : null,
     verifierId: row.verifierId ? String(row.verifierId) : null,
     checkerId: row.checkerId ? String(row.checkerId) : null,
     holdingAmount: row.holdingAmount,
@@ -395,9 +413,24 @@ function buildBudgetAllocationsPipeline(
   if (query.organizationNodeId) match.organizationNodeId = new Types.ObjectId(query.organizationNodeId);
   if (query.headId) match.headId = new Types.ObjectId(query.headId);
   if (query.approvalStatus) match.approvalStatus = query.approvalStatus;
+  if (query.maker) match.makerId = new Types.ObjectId(query.maker);
+  if (query.dateFrom || query.dateTo) {
+    const createdAt: Record<string, Date> = {};
+    if (query.dateFrom) createdAt.$gte = query.dateFrom;
+    if (query.dateTo) createdAt.$lte = query.dateTo;
+    match.createdAt = createdAt;
+  }
+  if (query.amountFrom !== undefined || query.amountTo !== undefined) {
+    const amount: Record<string, number> = {};
+    if (query.amountFrom !== undefined) amount.$gte = query.amountFrom;
+    if (query.amountTo !== undefined) amount.$lte = query.amountTo;
+    match.amount = amount;
+  }
   // Maker's view is restricted to their own assigned Organization Node(s) —
   // the allocation's actual target node, matching how its workflow itself
-  // resolves (see resolveScope below).
+  // resolves (see resolveScope below). Verifier/Checker approval queues use
+  // the same mechanism with their own actionable node set (see
+  // listPendingApprovalsForStage).
   if (allowedNodeIds) {
     const allowedObjectIds = allowedNodeIds.map((id) => new Types.ObjectId(id));
     match.organizationNodeId = match.organizationNodeId
@@ -434,6 +467,18 @@ function buildBudgetAllocationsPipeline(
       },
     },
     { $unwind: { path: "$financialYear", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "users",
+        let: { makerId: "$makerId" },
+        pipeline: [
+          { $match: { $expr: { $eq: ["$_id", "$$makerId"] } } },
+          { $project: { fullname: 1 } },
+        ],
+        as: "maker",
+      },
+    },
+    { $unwind: { path: "$maker", preserveNullAndEmptyArrays: true } },
   ];
 
   if (query.search) {
@@ -445,6 +490,7 @@ function buildBudgetAllocationsPipeline(
           { "organizationNode.name": regex },
           { "head.name": regex },
           { "financialYear.financialYear": regex },
+          { "maker.fullname": regex },
         ],
       },
     });
@@ -483,6 +529,107 @@ export async function listBudgetAllocations(
       totalPages: Math.max(Math.ceil(total / query.limit), 1),
     },
   };
+}
+
+/**
+ * The Budget Verification / Budget Checker screens' data source — paginated,
+ * filtered, sorted server-side, reusing listBudgetAllocations' own pipeline
+ * so both surfaces share one implementation. Node scope comes from
+ * getMyActionableNodeIds (the stage-appropriate assignment, expanded to
+ * every ungoverned descendant — §11), never from anything the client sends;
+ * an explicit organizationNodeId filter outside that scope yields an empty
+ * page rather than an error, so it can't be used to probe for other
+ * departments' data. approvalStatus is always forced to the stage's own
+ * status — a Verifier can never even construct a query that returns
+ * Checker-stage records.
+ */
+export async function listPendingApprovalsForStage(
+  stage: Extract<FmsRole, "Verifier" | "Checker">,
+  actor: ActorForPermission,
+  query: BudgetAllocationListQuery
+): Promise<ListResult<BudgetAllocationDto>> {
+  const actionableNodeIds = await getMyActionableNodeIds(actor, stage);
+  const allowedNodeIds = actionableNodeIds === "ALL" ? null : actionableNodeIds;
+
+  if (query.organizationNodeId && allowedNodeIds && !allowedNodeIds.includes(query.organizationNodeId)) {
+    return { items: [], meta: { page: query.page, limit: query.limit, total: 0, totalPages: 1 } };
+  }
+  if (allowedNodeIds && allowedNodeIds.length === 0) {
+    return { items: [], meta: { page: query.page, limit: query.limit, total: 0, totalPages: 1 } };
+  }
+
+  const forcedStatus: ApprovalStatus = stage === "Verifier" ? "PENDING_VERIFICATION" : "PENDING_CHECKER_APPROVAL";
+  return listBudgetAllocations({ ...query, approvalStatus: forcedStatus }, allowedNodeIds);
+}
+
+/** CSV export counterpart of listPendingApprovalsForStage — same scope, same filters, unbounded cursor. */
+export async function getPendingApprovalsCursorForStage(
+  stage: Extract<FmsRole, "Verifier" | "Checker">,
+  actor: ActorForPermission,
+  query: BudgetAllocationExportQuery
+) {
+  const actionableNodeIds = await getMyActionableNodeIds(actor, stage);
+  const allowedNodeIds = actionableNodeIds === "ALL" ? null : actionableNodeIds;
+
+  if (query.organizationNodeId && allowedNodeIds && !allowedNodeIds.includes(query.organizationNodeId)) {
+    return null;
+  }
+  if (allowedNodeIds && allowedNodeIds.length === 0) {
+    return null;
+  }
+
+  const forcedStatus: ApprovalStatus = stage === "Verifier" ? "PENDING_VERIFICATION" : "PENDING_CHECKER_APPROVAL";
+  return getBudgetAllocationsCursorForExport({ ...query, approvalStatus: forcedStatus }, allowedNodeIds);
+}
+
+export interface BulkWorkflowResult {
+  succeeded: string[];
+  failed: Array<{ id: string; reason: string }>;
+}
+
+/**
+ * Processes a batch of verify/approve requests as one backend operation —
+ * NOT a frontend loop calling the single-record endpoint N times. Each id
+ * is independently re-validated and processed through the exact same
+ * single-record function (same permission checks, same atomic transaction,
+ * same workflow history + activity log entry), so a batch is never
+ * all-or-nothing: one ineligible record (wrong stage, no permission,
+ * already acted on) is reported as a failure without blocking or silently
+ * skipping the rest (§6).
+ */
+async function processBulkWorkflowAction(
+  ids: string[],
+  action: (id: string) => Promise<unknown>
+): Promise<BulkWorkflowResult> {
+  const result: BulkWorkflowResult = { succeeded: [], failed: [] };
+  for (const id of ids) {
+    try {
+      await action(id);
+      result.succeeded.push(id);
+    } catch (error) {
+      result.failed.push({
+        id,
+        reason: error instanceof AppError ? error.message : "Failed to process this transaction.",
+      });
+    }
+  }
+  return result;
+}
+
+export async function bulkVerifyBudgetAllocations(
+  ids: string[],
+  input: { remarks?: string },
+  context: ActorContext
+): Promise<BulkWorkflowResult> {
+  return processBulkWorkflowAction(ids, (id) => verifyBudgetAllocation(id, input, context));
+}
+
+export async function bulkApproveBudgetAllocations(
+  ids: string[],
+  input: { remarks?: string },
+  context: ActorContext
+): Promise<BulkWorkflowResult> {
+  return processBulkWorkflowAction(ids, (id) => approveBudgetAllocation(id, input, context));
 }
 
 export async function getBudgetAllocationById(
@@ -562,24 +709,27 @@ async function resolveScope(scope: {
 async function reserveUpToFromPool(
   budgetSetupId: Types.ObjectId,
   desiredAmount: number,
-  context: ActorContext
+  context: ActorContext,
+  session: mongoose.ClientSession
 ): Promise<number> {
   if (desiredAmount <= 0) return 0;
 
   try {
-    await reserveBudgetAmount(String(budgetSetupId), desiredAmount, context);
+    await reserveBudgetAmount(String(budgetSetupId), desiredAmount, context, session);
     return desiredAmount;
   } catch (error) {
     if (!(error instanceof AppError) || error.statusCode !== 409) throw error;
   }
 
-  const pool = await BudgetSetupModel.findById(budgetSetupId).select("originalAmount allocatedAmount status");
+  const pool = await BudgetSetupModel.findById(budgetSetupId)
+    .session(session)
+    .select("originalAmount allocatedAmount status");
   if (!pool || pool.status !== "Active") return 0;
   const actuallyRemaining = pool.originalAmount - pool.allocatedAmount;
   if (actuallyRemaining <= 0) return 0;
 
   try {
-    await reserveBudgetAmount(String(budgetSetupId), actuallyRemaining, context);
+    await reserveBudgetAmount(String(budgetSetupId), actuallyRemaining, context, session);
     return actuallyRemaining;
   } catch {
     return 0;
@@ -589,23 +739,26 @@ async function reserveUpToFromPool(
 /**
  * Draws `amount` from the scope's pooled Budget Setups, oldest first,
  * splitting across as many as necessary. Re-reads each pool's live balance
- * as it goes (never relies on a stale snapshot), so sequential calls within
- * the same bulk submission correctly see what earlier rows already drew
- * down. If the pools combined can't cover the full amount, every partial
- * reservation already made in this call is released before rejecting —
- * this call is all-or-nothing even though it isn't one atomic DB operation.
+ * as it goes (within the same transaction session, so it sees its own
+ * writes), so sequential calls within the same bulk submission correctly
+ * see what earlier rows already drew down. If the pools combined can't
+ * cover the full amount, this throws and the caller's enclosing
+ * session.withTransaction() discards every reservation made in this call —
+ * no manual compensating release needed, the transaction itself is
+ * all-or-nothing (GLOBAL_RULES §8).
  */
 async function reserveFromScope(
   poolIds: Types.ObjectId[],
   amount: number,
-  context: ActorContext
+  context: ActorContext,
+  session: mongoose.ClientSession
 ): Promise<Array<{ budgetSetupId: Types.ObjectId; amount: number }>> {
   let remaining = amount;
   const breakdown: Array<{ budgetSetupId: Types.ObjectId; amount: number }> = [];
 
   for (const poolId of poolIds) {
     if (remaining <= 0) break;
-    const reserved = await reserveUpToFromPool(poolId, remaining, context);
+    const reserved = await reserveUpToFromPool(poolId, remaining, context, session);
     if (reserved > 0) {
       breakdown.push({ budgetSetupId: poolId, amount: reserved });
       remaining -= reserved;
@@ -613,15 +766,17 @@ async function reserveFromScope(
   }
 
   if (remaining > 0) {
-    for (const entry of breakdown) {
-      await releaseBudgetAmount(String(entry.budgetSetupId), entry.amount, context);
-    }
-    const pools = await BudgetSetupModel.find({ _id: { $in: poolIds } }).select("originalAmount allocatedAmount");
-    const totalRemaining = pools.reduce((sum, pool) => sum + Math.max(pool.originalAmount - pool.allocatedAmount, 0), 0);
+    // Every pool in poolIds was already drawn down to its actual max above
+    // (reserveUpToFromPool never leaves a pool partially short) — so
+    // `amount - remaining` IS the true total that was available across all
+    // of them, before this call. Re-querying the pools here would instead
+    // read their *mid-transaction* state (already reserved, not yet rolled
+    // back), which would wrongly report ~0 available.
+    const totalAvailable = amount - remaining;
     throw new AppError(
       409,
       "Requested amount exceeds the total remaining budget across all Budget Setups for this scope.",
-      { amount: [`Only ${totalRemaining} remains available across ${poolIds.length} Budget Setup(s).`] }
+      { amount: [`Only ${totalAvailable} remains available across ${poolIds.length} Budget Setup(s).`] }
     );
   }
 
@@ -720,49 +875,63 @@ export async function createBudgetAllocation(
   // The reservation happens unconditionally at Maker submission regardless
   // of the workflow — that IS what "Holding Amount" means here (§8): the
   // money is genuinely set aside immediately, never a soft/advisory hold.
-  const sourcePools = await reserveFromScope(scope.poolIds, input.amount, context);
-
+  // Reserving from the pool(s) and creating the allocation record happen in
+  // one MongoDB transaction — if either step fails, both roll back together
+  // rather than leaving money reserved with no matching allocation (or vice
+  // versa). See GLOBAL_RULES §8.
+  const session = await mongoose.startSession();
   let created: BudgetAllocationDocument;
+  let sourcePools: Array<{ budgetSetupId: Types.ObjectId; amount: number }>;
   try {
-    created = await BudgetAllocationModel.create({
-      financialYearId: scope.financialYearId,
-      organizationRootNodeId: scope.organizationRootNodeId,
-      organizationNodeId: input.organizationNodeId,
-      schemeHeadRootNodeId: scope.schemeHeadRootNodeId,
-      headId,
-      requireHeadAtCreation: requireHead,
-      amount: input.amount,
-      sourcePools,
-      approvalStatus: workflow.initialStatus,
-      workflowSnapshot: workflow.snapshot,
-      makerId: actorId,
-      holdingAmount: autoApproved ? 0 : input.amount,
-      approvedAmount: autoApproved ? input.amount : 0,
-      transferredAmount: autoApproved ? input.amount : 0,
-      approvedAt: autoApproved ? new Date() : null,
-      remarks: input.remarks ?? null,
-      createdBy: actorId,
-      updatedBy: actorId,
-    });
-  } catch (error) {
-    for (const pool of sourcePools) {
-      await releaseBudgetAmount(String(pool.budgetSetupId), pool.amount, context);
-    }
-    throw error;
-  }
+    const result = await session.withTransaction(async () => {
+      const pools = await reserveFromScope(scope.poolIds, input.amount, context, session);
+      const [doc] = await BudgetAllocationModel.create(
+        [
+          {
+            financialYearId: scope.financialYearId,
+            organizationRootNodeId: scope.organizationRootNodeId,
+            organizationNodeId: input.organizationNodeId,
+            schemeHeadRootNodeId: scope.schemeHeadRootNodeId,
+            headId,
+            requireHeadAtCreation: requireHead,
+            amount: input.amount,
+            sourcePools: pools,
+            approvalStatus: workflow.initialStatus,
+            workflowSnapshot: workflow.snapshot,
+            makerId: actorId,
+            holdingAmount: autoApproved ? 0 : input.amount,
+            approvedAmount: autoApproved ? input.amount : 0,
+            transferredAmount: autoApproved ? input.amount : 0,
+            approvedAt: autoApproved ? new Date() : null,
+            remarks: input.remarks ?? null,
+            createdBy: actorId,
+            updatedBy: actorId,
+          },
+        ],
+        { session }
+      );
 
-  await recordWorkflowEvent(
-    { module: "BUDGET_ALLOCATION", recordId: created._id, organizationNodeId: created.organizationNodeId, amount: created.amount },
-    {
-      action: "MAKER_SUBMITTED",
-      userId: actorId,
-      userRole: "Maker",
-      previousStatus: null,
-      newStatus: workflow.initialStatus,
-      holdingAmount: created.holdingAmount,
-      ipAddress: context.ipAddress,
-    }
-  );
+      await recordWorkflowEvent(
+        { module: "BUDGET_ALLOCATION", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.amount },
+        {
+          action: "MAKER_SUBMITTED",
+          userId: actorId,
+          userRole: "Maker",
+          previousStatus: null,
+          newStatus: workflow.initialStatus,
+          holdingAmount: doc.holdingAmount,
+          ipAddress: context.ipAddress,
+        },
+        session
+      );
+
+      return { doc, pools };
+    });
+    created = result.doc;
+    sourcePools = result.pools;
+  } finally {
+    await session.endSession();
+  }
 
   await logActivity({
     user: actorId,
@@ -821,72 +990,73 @@ export async function createBulkBudgetAllocations(
     validatedRows.push({ organizationNodeId: row.organizationNodeId, headId, amount: row.amount, workflow });
   }
 
-  const reservedRows: Array<{ row: (typeof validatedRows)[number]; sourcePools: Awaited<ReturnType<typeof reserveFromScope>> }> = [];
-  try {
-    for (const row of validatedRows) {
-      const sourcePools = await reserveFromScope(scope.poolIds, row.amount, context);
-      reservedRows.push({ row, sourcePools });
-    }
-  } catch (error) {
-    for (const entry of reservedRows) {
-      for (const pool of entry.sourcePools) {
-        await releaseBudgetAmount(String(pool.budgetSetupId), pool.amount, context);
-      }
-    }
-    throw error;
-  }
-
   const totalAmount = validatedRows.reduce((sum, row) => sum + row.amount, 0);
 
+  // Reserving every row's share of the pool(s) and creating all the
+  // allocation records happen in one MongoDB transaction — a later row's
+  // failure (e.g. the pools run out) rolls back every earlier row's
+  // reservation too, so the whole batch is genuinely all-or-nothing
+  // (GLOBAL_RULES §8), with no manual compensating release needed.
+  const session = await mongoose.startSession();
   let created: BudgetAllocationDocument[];
   try {
-    created = await BudgetAllocationModel.insertMany(
-      reservedRows.map(({ row, sourcePools }) => {
-        const autoApproved = row.workflow.initialStatus === "APPROVED";
-        return {
-          financialYearId: scope.financialYearId,
-          organizationRootNodeId: scope.organizationRootNodeId,
-          organizationNodeId: new Types.ObjectId(row.organizationNodeId),
-          schemeHeadRootNodeId: scope.schemeHeadRootNodeId,
-          headId: row.headId,
-          requireHeadAtCreation: requireHead,
-          amount: row.amount,
-          sourcePools,
-          approvalStatus: row.workflow.initialStatus,
-          workflowSnapshot: row.workflow.snapshot,
-          makerId: actorId,
-          holdingAmount: autoApproved ? 0 : row.amount,
-          approvedAmount: autoApproved ? row.amount : 0,
-          transferredAmount: autoApproved ? row.amount : 0,
-          approvedAt: autoApproved ? new Date() : null,
-          remarks: input.remarks ?? null,
-          createdBy: actorId,
-          updatedBy: actorId,
-        };
-      })
-    );
-  } catch (error) {
-    for (const entry of reservedRows) {
-      for (const pool of entry.sourcePools) {
-        await releaseBudgetAmount(String(pool.budgetSetupId), pool.amount, context);
+    created = await session.withTransaction(async () => {
+      const reservedRows: Array<{
+        row: (typeof validatedRows)[number];
+        sourcePools: Awaited<ReturnType<typeof reserveFromScope>>;
+      }> = [];
+      for (const row of validatedRows) {
+        const sourcePools = await reserveFromScope(scope.poolIds, row.amount, context, session);
+        reservedRows.push({ row, sourcePools });
       }
-    }
-    throw error;
-  }
 
-  for (const doc of created) {
-    await recordWorkflowEvent(
-      { module: "BUDGET_ALLOCATION", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.amount },
-      {
-        action: "MAKER_SUBMITTED",
-        userId: actorId,
-        userRole: "Maker",
-        previousStatus: null,
-        newStatus: doc.approvalStatus,
-        holdingAmount: doc.holdingAmount,
-        ipAddress: context.ipAddress,
+      const docs = await BudgetAllocationModel.create(
+        reservedRows.map(({ row, sourcePools }) => {
+          const autoApproved = row.workflow.initialStatus === "APPROVED";
+          return {
+            financialYearId: scope.financialYearId,
+            organizationRootNodeId: scope.organizationRootNodeId,
+            organizationNodeId: new Types.ObjectId(row.organizationNodeId),
+            schemeHeadRootNodeId: scope.schemeHeadRootNodeId,
+            headId: row.headId,
+            requireHeadAtCreation: requireHead,
+            amount: row.amount,
+            sourcePools,
+            approvalStatus: row.workflow.initialStatus,
+            workflowSnapshot: row.workflow.snapshot,
+            makerId: actorId,
+            holdingAmount: autoApproved ? 0 : row.amount,
+            approvedAmount: autoApproved ? row.amount : 0,
+            transferredAmount: autoApproved ? row.amount : 0,
+            approvedAt: autoApproved ? new Date() : null,
+            remarks: input.remarks ?? null,
+            createdBy: actorId,
+            updatedBy: actorId,
+          };
+        }),
+        { session }
+      );
+
+      for (const doc of docs) {
+        await recordWorkflowEvent(
+          { module: "BUDGET_ALLOCATION", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.amount },
+          {
+            action: "MAKER_SUBMITTED",
+            userId: actorId,
+            userRole: "Maker",
+            previousStatus: null,
+            newStatus: doc.approvalStatus,
+            holdingAmount: doc.holdingAmount,
+            ipAddress: context.ipAddress,
+          },
+          session
+        );
       }
-    );
+
+      return docs;
+    });
+  } finally {
+    await session.endSession();
   }
 
   await logActivity({
@@ -904,34 +1074,120 @@ export async function createBulkBudgetAllocations(
   return created.map((doc) => serialize(doc, maps));
 }
 
+export interface BudgetAllocationNodeFinancials {
+  organizationNodeId: string;
+  /** What this node has actually RECEIVED — APPROVED allocations targeting it directly. 0 while still pending. */
+  receivedAmount: number;
+  /** What this node has received OR has pending, i.e. non-rejected — what it has "spoken for" of its own incoming pool. */
+  heldAmount: number;
+  /** What this node has handed onward to its own direct children (non-rejected — reserved the moment it's submitted, same Holding semantics as everywhere else). */
+  subAllocatedAmount: number;
+  /** receivedAmount - subAllocatedAmount — this node's own balance still free to sub-allocate further. */
+  remainingAmount: number;
+}
+
 /**
- * Sum of every allocation already made to each Organization Node under a
- * scope — the "Budget Allocated" / "Remaining Fund" per-department figures
- * on the bulk allocation form. Expenditure and Hold aren't tracked yet
- * (Vendor Payments / approval workflow don't exist), so for now Remaining
- * Fund == Budget Allocated; the frontend computes that.
+ * Per-Organization-Node financial breakdown under a scope — the "Budget
+ * Allocated" / "Remaining Fund" figures on the bulk allocation form. This
+ * is tree-aware: a department that has itself received money and then
+ * sub-allocated part of it to child departments (e.g. "Tech" receiving
+ * ₹78,000 and handing ₹5,000 to "Mobile Development" + ₹2,000 to
+ * "QA Team") must show its OWN remaining balance (₹71,000), not the shared
+ * root pool's balance — the root pool figure is a separate, coarser number
+ * (see BudgetAvailabilityTiles) that already gates whether a NEW allocation
+ * can be created at all; this is about what each department has left of
+ * what it was itself handed.
  */
 export async function getBudgetAllocationNodeTotals(scope: {
   financialYearId: string;
   organizationRootNodeId: string;
   schemeHeadRootNodeId: string;
-}): Promise<Array<{ organizationNodeId: string; totalAmount: number }>> {
-  const rows = await BudgetAllocationModel.aggregate<{ _id: Types.ObjectId; totalAmount: number }>([
-    {
-      $match: {
-        financialYearId: new Types.ObjectId(scope.financialYearId),
-        organizationRootNodeId: new Types.ObjectId(scope.organizationRootNodeId),
-        schemeHeadRootNodeId: new Types.ObjectId(scope.schemeHeadRootNodeId),
-        // Rejected allocations already released their Holding back to the
-        // pool (see rejectBudgetAllocation) — they must not still count as
-        // "committed" to the department here.
-        approvalStatus: { $nin: ["REJECTED_BY_VERIFIER", "REJECTED_BY_CHECKER"] },
-      },
-    },
-    { $group: { _id: "$organizationNodeId", totalAmount: { $sum: "$amount" } } },
+}): Promise<BudgetAllocationNodeFinancials[]> {
+  const matchBase = {
+    financialYearId: new Types.ObjectId(scope.financialYearId),
+    organizationRootNodeId: new Types.ObjectId(scope.organizationRootNodeId),
+    schemeHeadRootNodeId: new Types.ObjectId(scope.schemeHeadRootNodeId),
+  };
+
+  const [receivedRows, heldRows, allOrgNodes] = await Promise.all([
+    BudgetAllocationModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
+      { $match: { ...matchBase, approvalStatus: "APPROVED" } },
+      { $group: { _id: "$organizationNodeId", amount: { $sum: "$amount" } } },
+    ]),
+    // Rejected allocations already released their Holding back to the pool
+    // (see rejectBudgetAllocation) — they must not still count as "held" here.
+    BudgetAllocationModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
+      { $match: { ...matchBase, approvalStatus: { $nin: ["REJECTED_BY_VERIFIER", "REJECTED_BY_CHECKER"] } } },
+      { $group: { _id: "$organizationNodeId", amount: { $sum: "$amount" } } },
+    ]),
+    OrganizationNodeModel.find({ status: "Active" }).select("_id parentNodeId").lean(),
   ]);
 
-  return rows.map((row) => ({ organizationNodeId: String(row._id), totalAmount: row.totalAmount }));
+  const receivedMap = new Map(receivedRows.map((r) => [String(r._id), r.amount]));
+  const heldMap = new Map(heldRows.map((r) => [String(r._id), r.amount]));
+  const parentById = new Map(allOrgNodes.map((n) => [String(n._id), n.parentNodeId ? String(n.parentNodeId) : null]));
+
+  const subAllocatedMap = new Map<string, number>();
+  for (const node of allOrgNodes) {
+    const nodeId = String(node._id);
+    const parentId = parentById.get(nodeId);
+    if (!parentId) continue;
+    const heldByThisNode = heldMap.get(nodeId) ?? 0;
+    if (heldByThisNode === 0) continue;
+    subAllocatedMap.set(parentId, (subAllocatedMap.get(parentId) ?? 0) + heldByThisNode);
+  }
+
+  const allNodeIds = new Set<string>([...receivedMap.keys(), ...heldMap.keys(), ...subAllocatedMap.keys()]);
+
+  return Array.from(allNodeIds).map((organizationNodeId) => {
+    const receivedAmount = receivedMap.get(organizationNodeId) ?? 0;
+    const subAllocatedAmount = subAllocatedMap.get(organizationNodeId) ?? 0;
+    return {
+      organizationNodeId,
+      receivedAmount,
+      heldAmount: heldMap.get(organizationNodeId) ?? 0,
+      subAllocatedAmount,
+      remainingAmount: receivedAmount - subAllocatedAmount,
+    };
+  });
+}
+
+export interface AllocatableNodeDto {
+  organizationNodeId: string;
+  name: string;
+  nodeType: string | null;
+  parentNodeId: string | null;
+}
+
+/**
+ * Every Organization Node a Maker may pick as an allocation target right
+ * now — their own assigned node(s) plus every descendant that inherits one
+ * of those nodes' workflow (§11/§17: a Department Maker must not be able to
+ * manually select another department's row to gain access, so the row list
+ * itself has to be pre-scoped server-side, not just the create action).
+ * Super Admin/Admin get `null` — they aren't restricted, the frontend uses
+ * the full Organization Tree for them instead.
+ */
+export async function getMyAllocatableNodes(actor: ActorForPermission): Promise<AllocatableNodeDto[] | null> {
+  const allowedNodeIds = await getAllowedNodeIdsForList(actor);
+  if (allowedNodeIds === null) return null;
+  if (allowedNodeIds.length === 0) return [];
+
+  const nodes = await OrganizationNodeModel.find({ _id: { $in: allowedNodeIds }, status: "Active" })
+    .select("name nodeTypeId parentNodeId")
+    .lean();
+  const nodeTypeIds = [...new Set(nodes.map((n) => n.nodeTypeId).filter(Boolean).map((id) => String(id)))];
+  const nodeTypes = nodeTypeIds.length > 0
+    ? await NodeTypeModel.find({ _id: { $in: nodeTypeIds } }).select("name").lean()
+    : [];
+  const nodeTypeNameById = new Map(nodeTypes.map((t) => [String(t._id), t.name]));
+
+  return nodes.map((node) => ({
+    organizationNodeId: String(node._id),
+    name: node.name,
+    nodeType: nodeTypeNameById.get(String(node.nodeTypeId)) ?? null,
+    parentNodeId: node.parentNodeId ? String(node.parentNodeId) : null,
+  }));
 }
 
 export async function verifyBudgetAllocation(
@@ -964,21 +1220,29 @@ export async function verifyBudgetAllocation(
     doc.approvedAt = new Date();
   }
   doc.updatedBy = actorId;
-  await doc.save();
 
-  await recordWorkflowEvent(
-    { module: "BUDGET_ALLOCATION", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.amount },
-    {
-      action: "VERIFIER_VERIFIED",
-      userId: actorId,
-      userRole: "Verifier",
-      previousStatus,
-      newStatus: nextStatus,
-      holdingAmount: doc.holdingAmount,
-      remarks: input.remarks,
-      ipAddress: context.ipAddress,
-    }
-  );
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await doc.save({ session });
+      await recordWorkflowEvent(
+        { module: "BUDGET_ALLOCATION", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.amount },
+        {
+          action: "VERIFIER_VERIFIED",
+          userId: actorId,
+          userRole: "Verifier",
+          previousStatus,
+          newStatus: nextStatus,
+          holdingAmount: doc.holdingAmount,
+          remarks: input.remarks,
+          ipAddress: context.ipAddress,
+        },
+        session
+      );
+    });
+  } finally {
+    await session.endSession();
+  }
 
   await logActivity({
     user: actorId,
@@ -1020,21 +1284,29 @@ export async function approveBudgetAllocation(
   doc.transferredAmount = doc.amount;
   doc.approvedAt = new Date();
   doc.updatedBy = actorId;
-  await doc.save();
 
-  await recordWorkflowEvent(
-    { module: "BUDGET_ALLOCATION", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.amount },
-    {
-      action: "CHECKER_APPROVED",
-      userId: actorId,
-      userRole: "Checker",
-      previousStatus,
-      newStatus: "APPROVED",
-      holdingAmount: 0,
-      remarks: input.remarks,
-      ipAddress: context.ipAddress,
-    }
-  );
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await doc.save({ session });
+      await recordWorkflowEvent(
+        { module: "BUDGET_ALLOCATION", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.amount },
+        {
+          action: "CHECKER_APPROVED",
+          userId: actorId,
+          userRole: "Checker",
+          previousStatus,
+          newStatus: "APPROVED",
+          holdingAmount: 0,
+          remarks: input.remarks,
+          ipAddress: context.ipAddress,
+        },
+        session
+      );
+    });
+  } finally {
+    await session.endSession();
+  }
 
   await logActivity({
     user: actorId,
@@ -1081,34 +1353,47 @@ export async function rejectBudgetAllocation(
     await assertCheckerPermission({ actorId, actorRole: requireActorRole(context) }, String(doc.organizationNodeId));
   }
 
-  for (const pool of doc.sourcePools) {
-    await releaseBudgetAmount(String(pool.budgetSetupId), pool.amount, context);
-  }
-
   const previousStatus = doc.approvalStatus;
-  doc.approvalStatus = isVerifierStage ? "REJECTED_BY_VERIFIER" : "REJECTED_BY_CHECKER";
-  doc.rejectionReason = input.reason;
-  doc.rejectedBy = actorId;
-  doc.rejectedAt = new Date();
-  doc.holdingAmount = 0;
-  if (isVerifierStage) doc.verifierId = actorId;
-  else doc.checkerId = actorId;
-  doc.updatedBy = actorId;
-  await doc.save();
 
-  await recordWorkflowEvent(
-    { module: "BUDGET_ALLOCATION", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.amount },
-    {
-      action: isVerifierStage ? "VERIFIER_REJECTED" : "CHECKER_REJECTED",
-      userId: actorId,
-      userRole: isVerifierStage ? "Verifier" : "Checker",
-      previousStatus,
-      newStatus: doc.approvalStatus,
-      holdingAmount: 0,
-      remarks: input.reason,
-      ipAddress: context.ipAddress,
-    }
-  );
+  // Releasing every source pool and flipping the allocation's own status
+  // happen in one MongoDB transaction — a crash or error partway through
+  // must never leave money released back to a pool while the allocation
+  // record still shows pending (or vice versa). See GLOBAL_RULES §8.
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      for (const pool of doc.sourcePools) {
+        await releaseBudgetAmount(String(pool.budgetSetupId), pool.amount, context, session);
+      }
+
+      doc.approvalStatus = isVerifierStage ? "REJECTED_BY_VERIFIER" : "REJECTED_BY_CHECKER";
+      doc.rejectionReason = input.reason;
+      doc.rejectedBy = actorId;
+      doc.rejectedAt = new Date();
+      doc.holdingAmount = 0;
+      if (isVerifierStage) doc.verifierId = actorId;
+      else doc.checkerId = actorId;
+      doc.updatedBy = actorId;
+      await doc.save({ session });
+
+      await recordWorkflowEvent(
+        { module: "BUDGET_ALLOCATION", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.amount },
+        {
+          action: isVerifierStage ? "VERIFIER_REJECTED" : "CHECKER_REJECTED",
+          userId: actorId,
+          userRole: isVerifierStage ? "Verifier" : "Checker",
+          previousStatus,
+          newStatus: doc.approvalStatus,
+          holdingAmount: 0,
+          remarks: input.reason,
+          ipAddress: context.ipAddress,
+        },
+        session
+      );
+    });
+  } finally {
+    await session.endSession();
+  }
 
   await logActivity({
     user: actorId,

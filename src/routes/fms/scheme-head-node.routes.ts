@@ -15,9 +15,18 @@ const router = Router();
 
 router.use(authenticate);
 
-// Only Super Admin manages the Scheme/Head Node master; Admin gets
-// read-only access to view the financial hierarchy.
-const canRead = authorizeRoles("Super Admin", "Admin");
+// Only Super Admin manages the Scheme/Head Node master; Admin, Maker,
+// Verifier, and Checker get read-only access to view the financial
+// hierarchy — a Maker needs it to pick a Head when creating a Budget
+// Allocation, and Verifier/Checker need it for the Scheme/Head filter on
+// their approval queues.
+const canRead = authorizeRoles(
+  "Super Admin",
+  "Admin",
+  "FMS Operational User - Maker",
+  "FMS Operational User - Verifier",
+  "FMS Operational User - Checker"
+);
 const canWrite = authorizeRoles("Super Admin");
 
 // Must be registered before "/:id" so "tree" isn't captured as an id.

@@ -18,9 +18,16 @@ const router = Router();
 
 router.use(authenticate);
 
-// Master Setup / hierarchy configuration is Super Admin-only; Admin gets
-// read-only access, matching every other Master Setup master.
-const canRead = authorizeRoles("Super Admin", "Admin");
+// Master Setup / hierarchy configuration is Super Admin-only; Admin, Maker,
+// Verifier, and Checker all get read-only access — every Budget Management
+// and approval-queue filter/picker depends on it.
+const canRead = authorizeRoles(
+  "Super Admin",
+  "Admin",
+  "FMS Operational User - Maker",
+  "FMS Operational User - Verifier",
+  "FMS Operational User - Checker"
+);
 const canWrite = authorizeRoles("Super Admin");
 
 // Must be registered before "/:id" so "current" isn't captured as an id.

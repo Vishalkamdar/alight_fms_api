@@ -508,15 +508,19 @@ export interface MyNodeAccessDto {
   nodeName: string;
   nodeType: string | null;
   role: FmsRole;
+  /** True when this assigned node has no parent — a Root-level assignment, which Budget Setup requires (§2/§12). */
+  isRootNode: boolean;
 }
 
 export async function getMyAccessibleNodes(userId: IdLike): Promise<MyNodeAccessDto[]> {
   const assignments = await FmsUserNodeRoleModel.find({ user: userId, status: "Active" });
 
   const nodeIds = [...new Set(assignments.map((assignment) => String(assignment.node)))];
-  const nodes = await OrganizationNodeModel.find({ _id: { $in: nodeIds } }).select("name nodeTypeId");
-  const nodeTypeIds = [...new Set(nodes.map((node) => String(node.nodeTypeId)))];
-  const nodeTypes = await NodeTypeModel.find({ _id: { $in: nodeTypeIds } }).select("name");
+  const nodes = await OrganizationNodeModel.find({ _id: { $in: nodeIds } }).select("name nodeTypeId parentNodeId");
+  const nodeTypeIds = [...new Set(nodes.map((node) => node.nodeTypeId).filter(Boolean).map((id) => String(id)))];
+  const nodeTypes = nodeTypeIds.length > 0
+    ? await NodeTypeModel.find({ _id: { $in: nodeTypeIds } }).select("name")
+    : [];
 
   const nodeTypeNameById = new Map(nodeTypes.map((nodeType) => [String(nodeType._id), nodeType.name]));
   const nodeById = new Map(nodes.map((node) => [String(node._id), node]));
@@ -531,6 +535,7 @@ export async function getMyAccessibleNodes(userId: IdLike): Promise<MyNodeAccess
       nodeName: node.name,
       nodeType: nodeTypeNameById.get(String(node.nodeTypeId)) ?? null,
       role: assignment.role,
+      isRootNode: !node.parentNodeId,
     });
   }
   return result;

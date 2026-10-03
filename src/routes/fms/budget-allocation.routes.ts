@@ -7,6 +7,7 @@ import {
   budgetAllocationExportQuerySchema,
   budgetAllocationListQuerySchema,
   budgetAllocationNodeTotalsQuerySchema,
+  bulkWorkflowActionSchema,
   createBudgetAllocationSchema,
   createBulkBudgetAllocationsSchema,
 } from "../../schemas/fms/budget-allocation.schema";
@@ -51,6 +52,50 @@ router.get(
   canRead,
   validate(budgetAllocationNodeTotalsQuerySchema, "query"),
   controller.getBudgetAllocationNodeTotals
+);
+// Must be registered before "/:id" too — a Maker's own list of selectable
+// allocation targets (§17: the row list itself must be pre-scoped, not just
+// the create action).
+router.get("/my-allocatable-nodes", canRead, controller.getMyAllocatableNodes);
+
+// The Budget Verification / Budget Checker screens — each gated to exactly
+// the one role that can act at that stage, node-scoped inside the service
+// (listPendingApprovalsForStage). Also registered before "/:id".
+router.get(
+  "/pending/verification",
+  canVerify,
+  validate(budgetAllocationListQuerySchema, "query"),
+  controller.listPendingVerification
+);
+router.get(
+  "/pending/verification/export",
+  canVerify,
+  validate(budgetAllocationExportQuerySchema, "query"),
+  controller.exportPendingVerification
+);
+router.get(
+  "/pending/checker",
+  canApprove,
+  validate(budgetAllocationListQuerySchema, "query"),
+  controller.listPendingChecker
+);
+router.get(
+  "/pending/checker/export",
+  canApprove,
+  validate(budgetAllocationExportQuerySchema, "query"),
+  controller.exportPendingChecker
+);
+router.post(
+  "/bulk-verify",
+  canVerify,
+  validate(bulkWorkflowActionSchema, "body"),
+  controller.bulkVerifyBudgetAllocations
+);
+router.post(
+  "/bulk-approve",
+  canApprove,
+  validate(bulkWorkflowActionSchema, "body"),
+  controller.bulkApproveBudgetAllocations
 );
 router.post(
   "/bulk",

@@ -12,6 +12,7 @@ import type {
   BudgetAllocationExportQuery,
   BudgetAllocationListQuery,
   BudgetAllocationNodeTotalsQuery,
+  BulkWorkflowActionInput,
   CreateBudgetAllocationInput,
   CreateBulkBudgetAllocationsInput,
 } from "../../schemas/fms/budget-allocation.schema";
@@ -78,10 +79,117 @@ export async function rejectBudgetAllocation(req: AuthenticatedRequest, res: Res
   sendSuccess(res, allocation, { message: "Budget Allocation rejected." });
 }
 
+export async function listPendingVerification(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const query = res.locals.query as BudgetAllocationListQuery;
+  const context = getActorContextWithRole(req);
+  const { items, meta } = await budgetAllocationService.listPendingApprovalsForStage("Verifier", context, query);
+  sendSuccess(res, items, { meta, message: "Pending verifications retrieved successfully." });
+}
+
+export async function listPendingChecker(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const query = res.locals.query as BudgetAllocationListQuery;
+  const context = getActorContextWithRole(req);
+  const { items, meta } = await budgetAllocationService.listPendingApprovalsForStage("Checker", context, query);
+  sendSuccess(res, items, { meta, message: "Pending Checker approvals retrieved successfully." });
+}
+
+export async function bulkVerifyBudgetAllocations(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { ids, remarks } = res.locals.body as BulkWorkflowActionInput;
+  const context = getActorContextWithRole(req);
+  const result = await budgetAllocationService.bulkVerifyBudgetAllocations(ids, { remarks }, context);
+  sendSuccess(res, result, {
+    message: `${result.succeeded.length} verified, ${result.failed.length} failed.`,
+  });
+}
+
+export async function bulkApproveBudgetAllocations(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { ids, remarks } = res.locals.body as BulkWorkflowActionInput;
+  const context = getActorContextWithRole(req);
+  const result = await budgetAllocationService.bulkApproveBudgetAllocations(ids, { remarks }, context);
+  sendSuccess(res, result, {
+    message: `${result.succeeded.length} approved, ${result.failed.length} failed.`,
+  });
+}
+
+const APPROVAL_CSV_HEADER = [
+  "Allocation Number",
+  "Date",
+  "Financial Year",
+  "Organization Node",
+  "Scheme / Head",
+  "Budget Setup Reference",
+  "Description / Purpose",
+  "Amount",
+  "Maker",
+  "Current Status",
+  "Submitted Date",
+];
+
+function writeApprovalCsvRows(res: Response, cursor: AsyncIterable<unknown>): Promise<void> {
+  return (async () => {
+    for await (const row of cursor) {
+      const dto = budgetAllocationService.serializeBudgetAllocationRowForExport(
+        row as Parameters<typeof budgetAllocationService.serializeBudgetAllocationRowForExport>[0]
+      );
+      res.write(
+        toCsvRow([
+          dto._id,
+          new Date(dto.createdAt).toISOString(),
+          dto.financialYear?.financialYear ?? "",
+          dto.organizationNode?.name ?? "",
+          dto.head?.name ?? "",
+          dto.sourcePools.map((pool) => pool.budgetSetupId).join("; "),
+          dto.remarks ?? "",
+          dto.amount,
+          dto.maker?.fullname ?? "",
+          dto.approvalStatus,
+          new Date(dto.createdAt).toISOString(),
+        ])
+      );
+    }
+  })();
+}
+
+export async function exportPendingVerification(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const query = res.locals.query as BudgetAllocationExportQuery;
+  const context = getActorContextWithRole(req);
+  const cursor = await budgetAllocationService.getPendingApprovalsCursorForStage("Verifier", context, query);
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="pending-verification-${new Date().toISOString().slice(0, 10)}.csv"`
+  );
+  res.write(toCsvRow(APPROVAL_CSV_HEADER));
+  if (cursor) await writeApprovalCsvRows(res, cursor);
+  res.end();
+}
+
+export async function exportPendingChecker(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const query = res.locals.query as BudgetAllocationExportQuery;
+  const context = getActorContextWithRole(req);
+  const cursor = await budgetAllocationService.getPendingApprovalsCursorForStage("Checker", context, query);
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="pending-checker-approval-${new Date().toISOString().slice(0, 10)}.csv"`
+  );
+  res.write(toCsvRow(APPROVAL_CSV_HEADER));
+  if (cursor) await writeApprovalCsvRows(res, cursor);
+  res.end();
+}
+
 export async function getBudgetAllocationNodeTotals(_req: AuthenticatedRequest, res: Response): Promise<void> {
   const scope = res.locals.query as BudgetAllocationNodeTotalsQuery;
   const totals = await budgetAllocationService.getBudgetAllocationNodeTotals(scope);
   sendSuccess(res, totals);
+}
+
+export async function getMyAllocatableNodes(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const context = getActorContextWithRole(req);
+  const nodes = await budgetAllocationService.getMyAllocatableNodes(context);
+  sendSuccess(res, nodes);
 }
 
 export async function uploadBudgetAllocationDocuments(req: AuthenticatedRequest, res: Response): Promise<void> {

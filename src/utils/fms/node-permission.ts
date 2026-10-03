@@ -1,6 +1,7 @@
 import { Types } from "mongoose";
 import { FmsUserNodeRoleModel, type FmsRole } from "../../models/fms/FmsUserNodeRole";
 import { FmsNodeRoleConfigModel } from "../../models/fms/FmsNodeRoleConfig";
+import { OrganizationNodeModel } from "../../models/OrganizationNode";
 import type { UserRole } from "../../models/User";
 
 type IdLike = string | Types.ObjectId;
@@ -50,10 +51,93 @@ export async function isNodeRoleEnabled(nodeId: IdLike, role: FmsRole): Promise<
   return Boolean(config[ROLE_ENABLED_FIELD[role]]);
 }
 
+/**
+ * Walks parentNodeId up from `nodeId` (itself first) and returns the
+ * nearest node — itself or an ancestor — that has an Active
+ * FmsNodeRoleConfig: the node whose Maker/Verifier/Checker settings
+ * actually govern this one. A sub-team under a configured department (e.g.
+ * "QA Team" under "Tech") has no config of its own, so it inherits Tech's
+ * — both the workflow requirement AND who's authorized to act, since
+ * FmsUserNodeRole assignments are only ever created on a node that itself
+ * has a config (assertRoleEnabledForNode), so an assignment on Tech IS an
+ * assignment on QA Team's governing node. Returns `nodeId` itself unchanged
+ * if nothing in the chain has a config (unconfigured subtree — Maker-only,
+ * everything auto-approves, same as before this existed).
+ */
+export async function resolveGoverningNodeId(nodeId: IdLike): Promise<string> {
+  let currentId: string | null = String(nodeId);
+  const visited = new Set<string>();
+
+  while (currentId) {
+    if (visited.has(currentId)) return String(nodeId);
+    visited.add(currentId);
+
+    const hasConfig = await FmsNodeRoleConfigModel.exists({ node: currentId, status: "Active" });
+    if (hasConfig) return currentId;
+
+    const current: { parentNodeId?: Types.ObjectId | null } | null = await OrganizationNodeModel.findById(
+      currentId
+    )
+      .select("parentNodeId")
+      .lean();
+    currentId = current?.parentNodeId ? String(current.parentNodeId) : null;
+  }
+
+  return String(nodeId);
+}
+
+/**
+ * Every Organization Node whose resolveGoverningNodeId() lands on one of
+ * `governingNodeIds` — including those governing nodes themselves. Used to
+ * expand "nodes I'm assigned Verifier/Checker on" into "nodes whose pending
+ * transactions I can actually see/act on," since a node assigned to a
+ * governing node implicitly covers every ungoverned descendant too.
+ * Resolves the whole active tree in two queries rather than walking each
+ * node individually.
+ */
+export async function getDescendantNodeIdsGovernedBy(governingNodeIds: string[]): Promise<string[]> {
+  if (governingNodeIds.length === 0) return [];
+  const governingSet = new Set(governingNodeIds);
+
+  const [allNodes, activeConfigs] = await Promise.all([
+    OrganizationNodeModel.find({ status: "Active" }).select("_id parentNodeId").lean(),
+    FmsNodeRoleConfigModel.find({ status: "Active" }).select("node").lean(),
+  ]);
+
+  const parentById = new Map(allNodes.map((n) => [String(n._id), n.parentNodeId ? String(n.parentNodeId) : null]));
+  const configuredNodeIds = new Set(activeConfigs.map((c) => String(c.node)));
+
+  const governingNodeCache = new Map<string, string>();
+  function resolveGoverning(nodeId: string, visited: Set<string>): string {
+    if (governingNodeCache.has(nodeId)) return governingNodeCache.get(nodeId)!;
+    if (visited.has(nodeId)) return nodeId;
+    visited.add(nodeId);
+
+    if (configuredNodeIds.has(nodeId)) {
+      governingNodeCache.set(nodeId, nodeId);
+      return nodeId;
+    }
+    const parentId = parentById.get(nodeId) ?? null;
+    const result = parentId ? resolveGoverning(parentId, visited) : nodeId;
+    governingNodeCache.set(nodeId, result);
+    return result;
+  }
+
+  return allNodes
+    .map((n) => String(n._id))
+    .filter((id) => governingSet.has(resolveGoverning(id, new Set())));
+}
+
+/**
+ * Whether the user may act as `role` on `nodeId` right now — resolved
+ * against `nodeId`'s GOVERNING node (itself, or its nearest configured
+ * ancestor), not necessarily `nodeId` literally. See resolveGoverningNodeId.
+ */
 export async function hasNodeRole(userId: IdLike, nodeId: IdLike, role: FmsRole): Promise<boolean> {
+  const governingNodeId = await resolveGoverningNodeId(nodeId);
   const [assigned, enabled] = await Promise.all([
-    FmsUserNodeRoleModel.exists({ user: userId, node: nodeId, role, status: "Active" }),
-    isNodeRoleEnabled(nodeId, role),
+    FmsUserNodeRoleModel.exists({ user: userId, node: governingNodeId, role, status: "Active" }),
+    isNodeRoleEnabled(governingNodeId, role),
   ]);
   return Boolean(assigned) && enabled;
 }

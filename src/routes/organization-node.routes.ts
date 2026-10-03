@@ -32,9 +32,14 @@ router.use(authenticate);
 
 // Writing the hierarchy (Master Setup > Organization Nodes) is Super
 // Admin-only. Admin keeps read access because the Organization Tree menu
-// item and every Budget Management node picker depend on it; FMS
-// Operational User has no access to either, so it's excluded from read too.
-const canRead = authorizeRoles("Super Admin", "Admin");
+// item and every Budget Management node picker depend on it. Maker also
+// needs read access — the Budget Allocation form's node pickers depend on
+// it too — but which nodes a Maker may actually SELECT as an allocation
+// target is separately restricted via /fms/budget-allocations/my-allocatable-nodes
+// and re-validated server-side on create; this is read-only structural data
+// (names/hierarchy), not financial data. Verifier/Checker have no Budget
+// Management access at all, so they're excluded from read here.
+const canRead = authorizeRoles("Super Admin", "Admin", "FMS Operational User - Maker");
 const canWrite = authorizeRoles("Super Admin");
 
 // Must be registered before "/:id" so these static segments aren't captured as an id.

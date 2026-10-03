@@ -36,6 +36,7 @@ export const BUDGET_ALLOCATION_SORT_KEYS = [
   "organizationNode",
   "head",
   "financialYear",
+  "maker",
 ] as const;
 
 export const budgetAllocationListQuerySchema = z.object({
@@ -46,6 +47,13 @@ export const budgetAllocationListQuerySchema = z.object({
   organizationNodeId: objectIdSchema.optional(),
   headId: objectIdSchema.optional(),
   approvalStatus: z.enum(APPROVAL_STATUSES).optional(),
+  // Approval-queue filters (Budget Verification / Budget Checker screens) —
+  // harmless no-ops for the plain Budget Management list, which never sends them.
+  dateFrom: z.coerce.date().optional(),
+  dateTo: z.coerce.date().optional(),
+  amountFrom: z.coerce.number().min(0).optional(),
+  amountTo: z.coerce.number().min(0).optional(),
+  maker: objectIdSchema.optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   sortBy: z.enum(BUDGET_ALLOCATION_SORT_KEYS).default("createdAt"),
@@ -55,6 +63,11 @@ export const budgetAllocationListQuerySchema = z.object({
 export const budgetAllocationExportQuerySchema = budgetAllocationListQuerySchema.omit({
   page: true,
   limit: true,
+});
+
+export const bulkWorkflowActionSchema = z.object({
+  ids: z.array(objectIdSchema).min(1, "Select at least one transaction.").max(200),
+  remarks: z.string().trim().max(1000).optional(),
 });
 
 /** One department's row in a bulk allocation submission — see createBulkBudgetAllocationsSchema. */
@@ -95,3 +108,4 @@ export type BudgetAllocationExportQuery = z.infer<typeof budgetAllocationExportQ
 export type CreateBulkBudgetAllocationsInput = z.infer<typeof createBulkBudgetAllocationsSchema>;
 export type BudgetAllocationNodeTotalsQuery = z.infer<typeof budgetAllocationNodeTotalsQuerySchema>;
 export type AttachBudgetAllocationDocumentInput = z.infer<typeof attachBudgetAllocationDocumentSchema>;
+export type BulkWorkflowActionInput = z.infer<typeof bulkWorkflowActionSchema>;

@@ -1,6 +1,13 @@
-import { Types } from "mongoose";
+import { Types, type ClientSession } from "mongoose";
 import { AppError } from "../../utils/AppError";
-import { hasNodeRole, isNodeRoleEnabled, getUserNodes, operationalRoleForSystemRole } from "../../utils/fms/node-permission";
+import {
+  hasNodeRole,
+  isNodeRoleEnabled,
+  getUserNodes,
+  operationalRoleForSystemRole,
+  resolveGoverningNodeId,
+  getDescendantNodeIdsGovernedBy,
+} from "../../utils/fms/node-permission";
 import { FmsNodeRoleConfigModel } from "../../models/fms/FmsNodeRoleConfig";
 import {
   FinancialWorkflowHistoryModel,
@@ -30,13 +37,17 @@ export interface ResolvedWorkflow {
 
 /**
  * Reads the target Organization Node's Maker/Verifier/Checker configuration
- * and derives both the immutable snapshot to store on the new record (§20 —
+ * — or, if it has none of its own, its nearest ancestor's (see
+ * resolveGoverningNodeId: a sub-team under a configured department inherits
+ * that department's workflow rather than silently requiring nothing) — and
+ * derives both the immutable snapshot to store on the new record (§20 —
  * a later config change must never reinterpret an existing record) and the
  * status it starts in. Case 4 (Maker only) resolves straight to APPROVED —
  * no approval stage, no Holding period.
  */
 export async function resolveWorkflowForNode(nodeId: string | Types.ObjectId): Promise<ResolvedWorkflow> {
-  const config = await FmsNodeRoleConfigModel.findOne({ node: nodeId, status: "Active" }).lean();
+  const governingNodeId = await resolveGoverningNodeId(nodeId);
+  const config = await FmsNodeRoleConfigModel.findOne({ node: governingNodeId, status: "Active" }).lean();
   const verifierRequired = Boolean(config?.verifierEnabled);
   const checkerRequired = Boolean(config?.checkerEnabled);
 
@@ -57,8 +68,13 @@ export interface ActorForPermission {
 /**
  * Every Organization Node id the user may act as `role` on right now — or
  * the literal "ALL" for Super Admin, who bypasses per-node assignment.
- * Used to scope "my pending approvals" queries (§3/§4 — Verifier/Checker
- * only ever see what they're actually authorized to act on).
+ * Expanded to include every descendant node that has no config of its own
+ * and so inherits one of these assigned nodes' workflow (see
+ * resolveGoverningNodeId/getDescendantNodeIdsGovernedBy) — a Verifier
+ * assigned on "Tech" must see a pending transaction targeting "QA Team"
+ * too, since Tech's config is what actually governs it. Used to scope "my
+ * pending approvals" queries (§3/§4 — Verifier/Checker only ever see what
+ * they're actually authorized to act on).
  */
 export async function getMyActionableNodeIds(
   actor: ActorForPermission,
@@ -66,22 +82,27 @@ export async function getMyActionableNodeIds(
 ): Promise<string[] | "ALL"> {
   if (actor.actorRole === "Super Admin") return "ALL";
   const nodes = await getUserNodes(actor.actorId);
-  return nodes.filter((node) => node.role === role).map((node) => node.nodeId);
+  const assignedNodeIds = nodes.filter((node) => node.role === role).map((node) => node.nodeId);
+  return getDescendantNodeIdsGovernedBy(assignedNodeIds);
 }
 
 /**
  * Restricts a Budget Setup/Allocation list, export, or single-record view to
  * the nodes the caller may actually see — null means unrestricted (Super
  * Admin, Admin), an array means "only these" (FMS Operational User -
- * Maker, scoped to their own assigned nodes; §9 — Maker never browses
- * another department's data). Verifier/Checker never call this: they have
- * no Budget Management access at all, only the separate my-pending endpoint.
+ * Maker, scoped to their own assigned nodes plus every descendant node that
+ * inherits one of those nodes' workflow — a Maker assigned on "Tech" can
+ * also create/see entries for "QA Team", which has no config of its own;
+ * §9 — Maker never browses another department's data). Verifier/Checker
+ * never call this: they have no Budget Management access at all, only the
+ * separate my-pending endpoint.
  */
 export async function getAllowedNodeIdsForList(actor: ActorForPermission): Promise<string[] | null> {
   const fmsRole = operationalRoleForSystemRole(actor.actorRole);
   if (!fmsRole) return null;
   const nodes = await getUserNodes(actor.actorId);
-  return nodes.filter((node) => node.role === fmsRole).map((node) => node.nodeId);
+  const assignedNodeIds = nodes.filter((node) => node.role === fmsRole).map((node) => node.nodeId);
+  return getDescendantNodeIdsGovernedBy(assignedNodeIds);
 }
 
 /**
@@ -113,13 +134,13 @@ export async function assertCheckerPermission(actor: ActorForPermission, nodeId:
   await assertHasRoleOnNode(actor, nodeId, "Checker");
 }
 
-/** Whether the current user is enabled as an approver of the given kind on this node. */
+/** Whether the current user is enabled as an approver of the given kind on this node (or its governing ancestor). */
 export async function canActAsRoleOnNode(
   actor: ActorForPermission,
   nodeId: string,
   role: FmsRole
 ): Promise<boolean> {
-  if (actor.actorRole === "Super Admin") return isNodeRoleEnabled(nodeId, role);
+  if (actor.actorRole === "Super Admin") return isNodeRoleEnabled(await resolveGoverningNodeId(nodeId), role);
   return hasNodeRole(actor.actorId, nodeId, role);
 }
 
@@ -162,20 +183,26 @@ export async function recordWorkflowEvent(
     holdingAmount: number;
     remarks?: string | null;
     ipAddress: string | null;
-  }
+  },
+  session?: ClientSession
 ): Promise<void> {
-  await FinancialWorkflowHistoryModel.create({
-    module: context.module,
-    recordId: context.recordId,
-    organizationNodeId: context.organizationNodeId,
-    amount: context.amount,
-    action: event.action,
-    userId: event.userId,
-    userRole: event.userRole,
-    previousStatus: event.previousStatus,
-    newStatus: event.newStatus,
-    holdingAmount: event.holdingAmount,
-    remarks: event.remarks ?? null,
-    ipAddress: event.ipAddress,
-  });
+  await FinancialWorkflowHistoryModel.create(
+    [
+      {
+        module: context.module,
+        recordId: context.recordId,
+        organizationNodeId: context.organizationNodeId,
+        amount: context.amount,
+        action: event.action,
+        userId: event.userId,
+        userRole: event.userRole,
+        previousStatus: event.previousStatus,
+        newStatus: event.newStatus,
+        holdingAmount: event.holdingAmount,
+        remarks: event.remarks ?? null,
+        ipAddress: event.ipAddress,
+      },
+    ],
+    { session }
+  );
 }
