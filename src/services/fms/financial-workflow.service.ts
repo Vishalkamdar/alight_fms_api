@@ -1,6 +1,6 @@
 import { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
-import { hasNodeRole, isNodeRoleEnabled, getUserNodes } from "../../utils/fms/node-permission";
+import { hasNodeRole, isNodeRoleEnabled, getUserNodes, operationalRoleForSystemRole } from "../../utils/fms/node-permission";
 import { FmsNodeRoleConfigModel } from "../../models/fms/FmsNodeRoleConfig";
 import {
   FinancialWorkflowHistoryModel,
@@ -67,6 +67,21 @@ export async function getMyActionableNodeIds(
   if (actor.actorRole === "Super Admin") return "ALL";
   const nodes = await getUserNodes(actor.actorId);
   return nodes.filter((node) => node.role === role).map((node) => node.nodeId);
+}
+
+/**
+ * Restricts a Budget Setup/Allocation list, export, or single-record view to
+ * the nodes the caller may actually see — null means unrestricted (Super
+ * Admin, Admin), an array means "only these" (FMS Operational User -
+ * Maker, scoped to their own assigned nodes; §9 — Maker never browses
+ * another department's data). Verifier/Checker never call this: they have
+ * no Budget Management access at all, only the separate my-pending endpoint.
+ */
+export async function getAllowedNodeIdsForList(actor: ActorForPermission): Promise<string[] | null> {
+  const fmsRole = operationalRoleForSystemRole(actor.actorRole);
+  if (!fmsRole) return null;
+  const nodes = await getUserNodes(actor.actorId);
+  return nodes.filter((node) => node.role === fmsRole).map((node) => node.nodeId);
 }
 
 /**

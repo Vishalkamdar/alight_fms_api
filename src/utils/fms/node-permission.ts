@@ -1,8 +1,26 @@
 import { Types } from "mongoose";
 import { FmsUserNodeRoleModel, type FmsRole } from "../../models/fms/FmsUserNodeRole";
 import { FmsNodeRoleConfigModel } from "../../models/fms/FmsNodeRoleConfig";
+import type { UserRole } from "../../models/User";
 
 type IdLike = string | Types.ObjectId;
+
+const SYSTEM_ROLE_TO_FMS_ROLE: Partial<Record<UserRole, FmsRole>> = {
+  "FMS Operational User - Maker": "Maker",
+  "FMS Operational User - Verifier": "Verifier",
+  "FMS Operational User - Checker": "Checker",
+};
+
+/**
+ * The single FmsRole a "FMS Operational User - X" system role corresponds
+ * to, or null for Super Admin/Admin (who aren't restricted to one role —
+ * their FmsUserNodeRole assignments, if any, may be any of the three).
+ * Used both to validate node-role assignments match the assignee's system
+ * role, and to scope Maker's own Budget Management views to their nodes.
+ */
+export function operationalRoleForSystemRole(role: UserRole): FmsRole | null {
+  return SYSTEM_ROLE_TO_FMS_ROLE[role] ?? null;
+}
 
 /**
  * Core permission primitives, reused by every future FMS module (Budget,

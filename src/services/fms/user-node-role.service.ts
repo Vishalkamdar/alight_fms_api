@@ -1,7 +1,7 @@
 import { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
 import { logActivity } from "../../utils/activity-log";
-import { UserModel } from "../../models/User";
+import { UserModel, type UserRole } from "../../models/User";
 import { OrganizationNodeModel } from "../../models/OrganizationNode";
 import { NodeTypeModel } from "../../models/NodeType";
 import {
@@ -12,7 +12,7 @@ import {
 } from "../../models/fms/FmsUserNodeRole";
 import { FmsUserNodeRoleAuditModel, type FmsAssignmentAction } from "../../models/fms/FmsUserNodeRoleAudit";
 import { FmsNodeRoleConfigModel } from "../../models/fms/FmsNodeRoleConfig";
-import { isNodeRoleEnabled } from "../../utils/fms/node-permission";
+import { isNodeRoleEnabled, operationalRoleForSystemRole } from "../../utils/fms/node-permission";
 import type {
   CreateUserNodeRoleInput,
   UpdateUserNodeRoleInput,
@@ -74,6 +74,24 @@ async function assertNodeExistsAndActive(nodeId: string) {
   return node;
 }
 
+/**
+ * A user whose system role is one of the three restricted "FMS Operational
+ * User - X" tiers may only ever be assigned the matching FmsRole — a
+ * Verifier-tier user can never be given a Maker or Checker node-role, etc.
+ * Super Admin and Admin aren't restricted this way (an Admin may act as any
+ * of the three, matching existing real-world usage).
+ */
+function assertAssignmentMatchesSystemRole(userSystemRole: UserRole, assignmentRole: FmsRole): void {
+  const requiredFmsRole = operationalRoleForSystemRole(userSystemRole);
+  if (requiredFmsRole && requiredFmsRole !== assignmentRole) {
+    throw new AppError(
+      422,
+      `This user's system role (${userSystemRole}) only permits the ${requiredFmsRole} node role, not ${assignmentRole}.`,
+      { role: [`Must be ${requiredFmsRole} to match this user's system role.`] }
+    );
+  }
+}
+
 async function ensureUserExists(userId: string): Promise<void> {
   const exists = await UserModel.exists({ _id: userId });
   if (!exists) throw new AppError(404, "User not found.");
@@ -115,9 +133,10 @@ export async function createAssignment(
   actorId: Types.ObjectId,
   context: ActorContext = {}
 ): Promise<FmsUserNodeRoleDocument> {
-  await assertUserExistsAndActive(input.user);
+  const user = await assertUserExistsAndActive(input.user);
   await assertNodeExistsAndActive(input.node);
   await assertRoleEnabledForNode(input.node, input.role);
+  assertAssignmentMatchesSystemRole(user.role, input.role);
 
   const existing = await FmsUserNodeRoleModel.findOne({
     user: input.user,
@@ -255,6 +274,8 @@ export async function updateAssignment(
 
   if (input.role && input.role !== assignment.role) {
     if (targetStatus === "Active") {
+      const user = await assertUserExistsAndActive(String(assignment.user));
+      assertAssignmentMatchesSystemRole(user.role, input.role);
       await assertRoleEnabledForNode(String(assignment.node), targetRole);
       const duplicate = await FmsUserNodeRoleModel.findOne({
         _id: { $ne: assignment._id },

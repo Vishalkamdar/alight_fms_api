@@ -5,6 +5,7 @@ import { getActorContext, getActorContextWithRole } from "../../utils/requestCon
 import { uploadBudgetDocument } from "../../utils/fms/upload";
 import { toCsvRow } from "../../utils/csv";
 import * as budgetSetupService from "../../services/fms/budget-setup.service";
+import { getAllowedNodeIdsForList } from "../../services/fms/financial-workflow.service";
 import type { AuthenticatedRequest } from "../../middleware/auth";
 import type {
   BudgetSetupExportQuery,
@@ -19,9 +20,11 @@ import type {
   WorkflowVerifyInput,
 } from "../../schemas/fms/financial-workflow.schema";
 
-export async function listBudgetSetups(_req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function listBudgetSetups(req: AuthenticatedRequest, res: Response): Promise<void> {
   const query = res.locals.query as BudgetSetupListQuery;
-  const { items, meta } = await budgetSetupService.listBudgetSetups(query);
+  const context = getActorContextWithRole(req);
+  const allowedNodeIds = await getAllowedNodeIdsForList(context);
+  const { items, meta } = await budgetSetupService.listBudgetSetups(query, allowedNodeIds);
   sendSuccess(res, items, { meta, message: "Budget Setups retrieved successfully." });
 }
 
@@ -43,8 +46,10 @@ const CSV_HEADER = [
  * full export in memory first — required so a large Budget Setup collection
  * can't spike server memory just because someone clicked "Export CSV".
  */
-export async function exportBudgetSetups(_req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function exportBudgetSetups(req: AuthenticatedRequest, res: Response): Promise<void> {
   const query = res.locals.query as BudgetSetupExportQuery;
+  const context = getActorContextWithRole(req);
+  const allowedNodeIds = await getAllowedNodeIdsForList(context);
 
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader(
@@ -54,7 +59,7 @@ export async function exportBudgetSetups(_req: AuthenticatedRequest, res: Respon
 
   res.write(toCsvRow(CSV_HEADER));
 
-  const cursor = budgetSetupService.getBudgetSetupsCursorForExport(query);
+  const cursor = budgetSetupService.getBudgetSetupsCursorForExport(query, allowedNodeIds);
   for await (const row of cursor) {
     const dto = budgetSetupService.serializeBudgetSetupRowForExport(row);
     res.write(
@@ -76,9 +81,11 @@ export async function exportBudgetSetups(_req: AuthenticatedRequest, res: Respon
   res.end();
 }
 
-export async function getBudgetSetup(_req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function getBudgetSetup(req: AuthenticatedRequest, res: Response): Promise<void> {
   const { id } = res.locals.params as { id: string };
-  const budgetSetup = await budgetSetupService.getBudgetSetupById(id);
+  const context = getActorContextWithRole(req);
+  const allowedNodeIds = await getAllowedNodeIdsForList(context);
+  const budgetSetup = await budgetSetupService.getBudgetSetupById(id, allowedNodeIds);
   sendSuccess(res, budgetSetup);
 }
 

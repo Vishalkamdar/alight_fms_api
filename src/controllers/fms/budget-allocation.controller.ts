@@ -5,6 +5,7 @@ import { AppError } from "../../utils/AppError";
 import { toCsvRow } from "../../utils/csv";
 import { uploadBudgetAllocationDocument } from "../../utils/fms/upload";
 import * as budgetAllocationService from "../../services/fms/budget-allocation.service";
+import { getAllowedNodeIdsForList } from "../../services/fms/financial-workflow.service";
 import { attachBudgetAllocationDocumentSchema } from "../../schemas/fms/budget-allocation.schema";
 import type { AuthenticatedRequest } from "../../middleware/auth";
 import type {
@@ -20,15 +21,19 @@ import type {
   WorkflowVerifyInput,
 } from "../../schemas/fms/financial-workflow.schema";
 
-export async function listBudgetAllocations(_req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function listBudgetAllocations(req: AuthenticatedRequest, res: Response): Promise<void> {
   const query = res.locals.query as BudgetAllocationListQuery;
-  const { items, meta } = await budgetAllocationService.listBudgetAllocations(query);
+  const context = getActorContextWithRole(req);
+  const allowedNodeIds = await getAllowedNodeIdsForList(context);
+  const { items, meta } = await budgetAllocationService.listBudgetAllocations(query, allowedNodeIds);
   sendSuccess(res, items, { meta, message: "Budget Allocations retrieved successfully." });
 }
 
-export async function getBudgetAllocation(_req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function getBudgetAllocation(req: AuthenticatedRequest, res: Response): Promise<void> {
   const { id } = res.locals.params as { id: string };
-  const allocation = await budgetAllocationService.getBudgetAllocationById(id);
+  const context = getActorContextWithRole(req);
+  const allowedNodeIds = await getAllowedNodeIdsForList(context);
+  const allocation = await budgetAllocationService.getBudgetAllocationById(id, allowedNodeIds);
   sendSuccess(res, allocation);
 }
 
@@ -127,9 +132,11 @@ const CSV_HEADER = [
   "Created At",
 ];
 
-export async function exportBudgetAllocations(_req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function exportBudgetAllocations(req: AuthenticatedRequest, res: Response): Promise<void> {
   const query = res.locals.query as BudgetAllocationExportQuery;
-  const cursor = budgetAllocationService.getBudgetAllocationsCursorForExport(query);
+  const context = getActorContextWithRole(req);
+  const allowedNodeIds = await getAllowedNodeIdsForList(context);
+  const cursor = budgetAllocationService.getBudgetAllocationsCursorForExport(query, allowedNodeIds);
 
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader(

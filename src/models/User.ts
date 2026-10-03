@@ -1,18 +1,28 @@
 import { Schema, model, Document, Types } from "mongoose";
 
 /**
- * Application-level roles only. FMS operational roles (Maker/Verifier/
- * Checker) are never stored here — see models/fms/FmsUserNodeRole.ts.
- *
- * "FMS Operational User" is a restricted third tier: it can access ONLY the
- * Approvals module, and even there only the transactions its assigned
- * Maker/Verifier/Checker node-role and Organization Node actually cover. It
- * has no Master Setup, Manage Users, Budget Management, or any other menu
- * access. See the per-route authorizeRoles() calls across src/routes for
- * exactly what each role can reach, and constants/fms/nav.ts (frontend) for
- * the matching menu visibility rules.
+ * Application-level roles. The three "FMS Operational User - X" roles are
+ * restricted, mutually exclusive tiers — each gets exactly one menu and one
+ * workflow action, never a combination:
+ *   - Maker: Budget Management only (create/edit entries pre-verification).
+ *   - Verifier: Approvals only, and only the "verify" action.
+ *   - Checker: Approvals only, and only the "approve" (final) action.
+ * None of the three has Master Setup, Manage Users, or any other menu
+ * access. A user's FmsUserNodeRole assignments (models/fms/FmsUserNodeRole)
+ * still carry WHICH Organization Node(s) they can act on — this system role
+ * only fixes WHICH of Maker/Verifier/Checker they're allowed to be assigned
+ * as (see user-node-role.service.ts's role-match check on assignment). See
+ * the per-route authorizeRoles() calls across src/routes for exactly what
+ * each role can reach, and constants/fms/nav.ts (frontend) for the matching
+ * menu visibility rules.
  */
-export const USER_ROLES = ["Super Admin", "Admin", "FMS Operational User"] as const;
+export const USER_ROLES = [
+  "Super Admin",
+  "Admin",
+  "FMS Operational User - Maker",
+  "FMS Operational User - Verifier",
+  "FMS Operational User - Checker",
+] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
 export const DEFAULT_USER_ROLE: UserRole = "Admin";

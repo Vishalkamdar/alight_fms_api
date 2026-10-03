@@ -22,15 +22,28 @@ const router = Router();
 
 router.use(authenticate);
 
-// Budget Management (list/create/update/export/documents) is a Super
-// Admin + Admin menu — FMS Operational User has no Budget Management access
-// at all. verify/approve/reject below are gated separately: they belong to
-// the Approvals module, which Operational User CAN reach, with the real
-// Maker/Verifier/Checker + Organization Node + workflow-status enforcement
-// happening inside the service (see financial-workflow.service.ts).
-const canRead = authorizeRoles("Super Admin", "Admin");
-const canWrite = authorizeRoles("Super Admin", "Admin");
-const canActOnWorkflow = authorizeRoles("Super Admin", "Admin", "FMS Operational User");
+// Budget Management (list/create/update/export/documents) is a Super Admin
+// + Admin + Maker menu — Verifier/Checker have no Budget Management access
+// at all, they only reach Approvals. List/export/get are further node-scoped
+// to Maker's own assigned nodes inside the service (a Maker never browses
+// another department's data). verify/approve/reject are split by exact
+// operational role below — Verifier can verify or reject, Checker can
+// approve or reject, neither can do the other's action — with the real
+// Organization Node + workflow-status enforcement happening inside the
+// service (see financial-workflow.service.ts).
+const canRead = authorizeRoles("Super Admin", "Admin", "FMS Operational User - Maker");
+const canWrite = authorizeRoles("Super Admin", "Admin", "FMS Operational User - Maker");
+const canVerify = authorizeRoles("Super Admin", "Admin", "FMS Operational User - Verifier");
+const canApprove = authorizeRoles("Super Admin", "Admin", "FMS Operational User - Checker");
+const canReject = authorizeRoles(
+  "Super Admin",
+  "Admin",
+  "FMS Operational User - Verifier",
+  "FMS Operational User - Checker"
+);
+// Active/Inactive status is an administrative archival flag, not part of
+// the Maker's create/edit workflow — stays Super Admin + Admin only.
+const canManageStatus = authorizeRoles("Super Admin", "Admin");
 
 // Must be registered before "/:id" so "export" isn't captured as an id.
 router.get(
@@ -58,28 +71,28 @@ router.put(
 );
 router.patch(
   "/:id/status",
-  canWrite,
+  canManageStatus,
   validate(objectIdParamsSchema, "params"),
   validate(updateBudgetSetupStatusSchema, "body"),
   controller.updateBudgetSetupStatus
 );
 router.post(
   "/:id/verify",
-  canActOnWorkflow,
+  canVerify,
   validate(objectIdParamsSchema, "params"),
   validate(workflowVerifySchema, "body"),
   controller.verifyBudgetSetup
 );
 router.post(
   "/:id/approve",
-  canActOnWorkflow,
+  canApprove,
   validate(objectIdParamsSchema, "params"),
   validate(workflowApproveSchema, "body"),
   controller.approveBudgetSetup
 );
 router.post(
   "/:id/reject",
-  canActOnWorkflow,
+  canReject,
   validate(objectIdParamsSchema, "params"),
   validate(workflowRejectSchema, "body"),
   controller.rejectBudgetSetup

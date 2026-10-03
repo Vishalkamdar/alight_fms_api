@@ -383,7 +383,8 @@ function serializeAggregatedRow(row: AggregatedBudgetAllocationRow): BudgetAlloc
  * combined with server-side pagination without corrupting the total count.
  */
 function buildBudgetAllocationsPipeline(
-  query: BudgetAllocationListQuery | BudgetAllocationExportQuery
+  query: BudgetAllocationListQuery | BudgetAllocationExportQuery,
+  allowedNodeIds?: string[] | null
 ): mongoose.PipelineStage[] {
   const match: Record<string, unknown> = {};
   if (query.financialYearId) match.financialYearId = new Types.ObjectId(query.financialYearId);
@@ -394,6 +395,15 @@ function buildBudgetAllocationsPipeline(
   if (query.organizationNodeId) match.organizationNodeId = new Types.ObjectId(query.organizationNodeId);
   if (query.headId) match.headId = new Types.ObjectId(query.headId);
   if (query.approvalStatus) match.approvalStatus = query.approvalStatus;
+  // Maker's view is restricted to their own assigned Organization Node(s) —
+  // the allocation's actual target node, matching how its workflow itself
+  // resolves (see resolveScope below).
+  if (allowedNodeIds) {
+    const allowedObjectIds = allowedNodeIds.map((id) => new Types.ObjectId(id));
+    match.organizationNodeId = match.organizationNodeId
+      ? { $eq: match.organizationNodeId, $in: allowedObjectIds }
+      : { $in: allowedObjectIds };
+  }
 
   const pipeline: mongoose.PipelineStage[] = [
     { $match: match },
@@ -447,9 +457,10 @@ function buildBudgetAllocationsPipeline(
 }
 
 export async function listBudgetAllocations(
-  query: BudgetAllocationListQuery
+  query: BudgetAllocationListQuery,
+  allowedNodeIds?: string[] | null
 ): Promise<ListResult<BudgetAllocationDto>> {
-  const pipeline = buildBudgetAllocationsPipeline(query);
+  const pipeline = buildBudgetAllocationsPipeline(query, allowedNodeIds);
 
   const [result] = await BudgetAllocationModel.aggregate([
     ...pipeline,
@@ -474,9 +485,15 @@ export async function listBudgetAllocations(
   };
 }
 
-export async function getBudgetAllocationById(id: string): Promise<BudgetAllocationDto> {
+export async function getBudgetAllocationById(
+  id: string,
+  allowedNodeIds?: string[] | null
+): Promise<BudgetAllocationDto> {
   const doc = await BudgetAllocationModel.findById(id);
   if (!doc) throw new AppError(404, "Budget Allocation not found.");
+  if (allowedNodeIds && !allowedNodeIds.includes(String(doc.organizationNodeId))) {
+    throw new AppError(404, "Budget Allocation not found.");
+  }
   const maps = await buildLookupMaps();
   return serialize(doc, maps);
 }
@@ -1115,8 +1132,11 @@ export async function rejectBudgetAllocation(
  * matching row is included regardless of position (unlike a post-hoc filter
  * over an already-paginated slice).
  */
-export function getBudgetAllocationsCursorForExport(query: BudgetAllocationExportQuery) {
-  const pipeline = buildBudgetAllocationsPipeline(query);
+export function getBudgetAllocationsCursorForExport(
+  query: BudgetAllocationExportQuery,
+  allowedNodeIds?: string[] | null
+) {
+  const pipeline = buildBudgetAllocationsPipeline(query, allowedNodeIds);
   return BudgetAllocationModel.aggregate<AggregatedBudgetAllocationRow>(pipeline).cursor();
 }
 

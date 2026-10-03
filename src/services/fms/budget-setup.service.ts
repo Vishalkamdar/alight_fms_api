@@ -345,7 +345,8 @@ function serializeAggregatedRow(row: AggregatedBudgetSetupRow): BudgetSetupDto {
  * exists on a referenced document without joining it in first.
  */
 function buildBudgetSetupsPipeline(
-  query: BudgetSetupListQuery | BudgetSetupExportQuery
+  query: BudgetSetupListQuery | BudgetSetupExportQuery,
+  allowedNodeIds?: string[] | null
 ): mongoose.PipelineStage[] {
   const match: Record<string, unknown> = {};
   if (query.financialYearId) match.financialYearId = new Types.ObjectId(query.financialYearId);
@@ -353,6 +354,15 @@ function buildBudgetSetupsPipeline(
   if (query.schemeHeadNodeId) match.schemeHeadNodeId = new Types.ObjectId(query.schemeHeadNodeId);
   if (query.status) match.status = query.status;
   if (query.approvalStatus) match.approvalStatus = query.approvalStatus;
+  // Maker's view is restricted to their own assigned Organization Node(s) —
+  // intersected with any explicit organizationNodeId filter above, so an
+  // out-of-scope node id simply yields zero rows rather than leaking data.
+  if (allowedNodeIds) {
+    const allowedObjectIds = allowedNodeIds.map((id) => new Types.ObjectId(id));
+    match.organizationNodeId = match.organizationNodeId
+      ? { $eq: match.organizationNodeId, $in: allowedObjectIds }
+      : { $in: allowedObjectIds };
+  }
 
   const pipeline: mongoose.PipelineStage[] = [
     { $match: match },
@@ -406,8 +416,11 @@ function buildBudgetSetupsPipeline(
   return pipeline;
 }
 
-export async function listBudgetSetups(query: BudgetSetupListQuery): Promise<ListResult<BudgetSetupDto>> {
-  const pipeline = buildBudgetSetupsPipeline(query);
+export async function listBudgetSetups(
+  query: BudgetSetupListQuery,
+  allowedNodeIds?: string[] | null
+): Promise<ListResult<BudgetSetupDto>> {
+  const pipeline = buildBudgetSetupsPipeline(query, allowedNodeIds);
 
   const [result] = await BudgetSetupModel.aggregate([
     ...pipeline,
@@ -437,8 +450,8 @@ export async function listBudgetSetups(query: BudgetSetupListQuery): Promise<Lis
  * result set in memory) for the CSV export — same filters/search/sort as
  * the list, just unbounded.
  */
-export function getBudgetSetupsCursorForExport(query: BudgetSetupExportQuery) {
-  const pipeline = buildBudgetSetupsPipeline(query);
+export function getBudgetSetupsCursorForExport(query: BudgetSetupExportQuery, allowedNodeIds?: string[] | null) {
+  const pipeline = buildBudgetSetupsPipeline(query, allowedNodeIds);
   return BudgetSetupModel.aggregate<AggregatedBudgetSetupRow>(pipeline).cursor();
 }
 
@@ -474,8 +487,14 @@ export async function getMyPendingBudgetSetups(actor: ActorForPermission): Promi
   return docs.map((doc) => serialize(doc, maps));
 }
 
-export async function getBudgetSetupById(id: string): Promise<BudgetSetupDto> {
+export async function getBudgetSetupById(id: string, allowedNodeIds?: string[] | null): Promise<BudgetSetupDto> {
   const doc = await findByIdOr404(id);
+  // Same node restriction as the list/export views — a Maker can't reach
+  // another department's record via a direct id either. 404, not 403, so
+  // existence isn't leaked (§9).
+  if (allowedNodeIds && !allowedNodeIds.includes(String(doc.organizationNodeId))) {
+    throw new AppError(404, "Budget Setup not found.");
+  }
   const maps = await buildLookupMaps();
   return serialize(doc, maps);
 }

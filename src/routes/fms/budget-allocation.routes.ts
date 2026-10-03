@@ -22,13 +22,22 @@ const router = Router();
 router.use(authenticate);
 
 // Matches Budget Setup's access split: list/create/update/export is a Super
-// Admin + Admin (Budget Management) menu; verify/approve/reject belongs to
-// Approvals, which FMS Operational User can also reach, with the real
-// Maker/Verifier/Checker + Organization Node + workflow-status enforcement
-// happening inside the service (see financial-workflow.service.ts).
-const canRead = authorizeRoles("Super Admin", "Admin");
-const canWrite = authorizeRoles("Super Admin", "Admin");
-const canActOnWorkflow = authorizeRoles("Super Admin", "Admin", "FMS Operational User");
+// Admin + Admin + Maker (Budget Management) menu, node-scoped to Maker's own
+// nodes inside the service; verify/approve/reject are split by exact
+// operational role — Verifier can verify or reject, Checker can approve or
+// reject, neither can do the other's action — with the real Organization
+// Node + workflow-status enforcement happening inside the service (see
+// financial-workflow.service.ts).
+const canRead = authorizeRoles("Super Admin", "Admin", "FMS Operational User - Maker");
+const canWrite = authorizeRoles("Super Admin", "Admin", "FMS Operational User - Maker");
+const canVerify = authorizeRoles("Super Admin", "Admin", "FMS Operational User - Verifier");
+const canApprove = authorizeRoles("Super Admin", "Admin", "FMS Operational User - Checker");
+const canReject = authorizeRoles(
+  "Super Admin",
+  "Admin",
+  "FMS Operational User - Verifier",
+  "FMS Operational User - Checker"
+);
 
 // Must be registered before "/:id" so these static segments aren't captured as an id.
 router.get(
@@ -68,21 +77,21 @@ router.post(
 router.get("/:id", canRead, validate(objectIdParamsSchema, "params"), controller.getBudgetAllocation);
 router.post(
   "/:id/verify",
-  canActOnWorkflow,
+  canVerify,
   validate(objectIdParamsSchema, "params"),
   validate(workflowVerifySchema, "body"),
   controller.verifyBudgetAllocation
 );
 router.post(
   "/:id/approve",
-  canActOnWorkflow,
+  canApprove,
   validate(objectIdParamsSchema, "params"),
   validate(workflowApproveSchema, "body"),
   controller.approveBudgetAllocation
 );
 router.post(
   "/:id/reject",
-  canActOnWorkflow,
+  canReject,
   validate(objectIdParamsSchema, "params"),
   validate(workflowRejectSchema, "body"),
   controller.rejectBudgetAllocation
