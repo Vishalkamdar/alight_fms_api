@@ -28,6 +28,31 @@ export interface BudgetAllocationSourcePool {
 }
 
 /**
+ * How much of this allocation's `amount` was drawn from one specific
+ * ancestor allocation — i.e. this row's own target node is NOT a direct
+ * child of the scope's root Organization Node, so beyond the root Budget
+ * Setup pool check (sourcePools, which still applies to every row
+ * regardless of depth), the amount must also come out of what the target's
+ * immediate PARENT node itself already received (its own APPROVED
+ * BudgetAllocation record(s)) — a department can never hand its own
+ * sub-teams more than it was itself allocated, even when the shared root
+ * pool still has headroom from other departments. Empty when the target's
+ * parent IS the scope root (no such constraint applies there).
+ *
+ * The parent's own "received pool" isn't always a BudgetAllocation receipt
+ * — a parent that itself received money via a Pull/Return fund transfer
+ * (see FundTransfer.ts) can re-allocate THAT money onward too, so `kind`
+ * tells release-on-reject which collection `poolId` actually
+ * lives in. Defaults to "BUDGET_ALLOCATION" for records created before
+ * this field existed.
+ */
+export interface BudgetAllocationParentSourcePool {
+  kind: "BUDGET_ALLOCATION" | "FUND_TRANSFER";
+  poolId: Types.ObjectId;
+  amount: number;
+}
+
+/**
  * A commitment of money from a (Financial Year, root Organization Node, root
  * Scheme/Head Node) scope's pooled Budget Setups to a specific Organization
  * Node — optionally attributed to a Scheme/Head Node when the "Require Head"
@@ -53,6 +78,15 @@ export interface BudgetAllocationDocument extends Document {
   requireHeadAtCreation: boolean;
   amount: number;
   sourcePools: BudgetAllocationSourcePool[];
+  parentSourcePools: BudgetAllocationParentSourcePool[];
+  // How much of THIS record's own `amount` has, in turn, been committed
+  // onward to this node's own children's allocations (via their
+  // parentSourcePools above) — this node's receiving-side counter,
+  // incremented/decremented atomically the same way BudgetSetup.allocatedAmount
+  // is, so a node's own sub-teams can never jointly exceed what the node
+  // itself actually received. Only ever drawn from while this record is
+  // APPROVED (see reserveFromParentPool in budget-allocation.service.ts).
+  subAllocatedAmount: number;
   // ---- GLOBAL FINANCIAL APPROVAL WORKFLOW (Maker/Verifier/Checker) ----
   // The workflow applies per the ALLOCATION's specific target Organization
   // Node (organizationNodeId — e.g. "BAEG"), not the scope's root, since
@@ -112,6 +146,15 @@ const budgetAllocationSourcePoolSchema = new Schema<BudgetAllocationSourcePool>(
   { _id: false }
 );
 
+const budgetAllocationParentSourcePoolSchema = new Schema<BudgetAllocationParentSourcePool>(
+  {
+    kind: { type: String, enum: ["BUDGET_ALLOCATION", "FUND_TRANSFER"], required: true, default: "BUDGET_ALLOCATION" },
+    poolId: { type: Schema.Types.ObjectId, required: true },
+    amount: { type: Number, required: true, min: 0 },
+  },
+  { _id: false }
+);
+
 const budgetAllocationSchema = new Schema<BudgetAllocationDocument>(
   {
     financialYearId: { type: Schema.Types.ObjectId, ref: "FinancialYear", required: true },
@@ -124,6 +167,8 @@ const budgetAllocationSchema = new Schema<BudgetAllocationDocument>(
     requireHeadAtCreation: { type: Boolean, required: true },
     amount: { type: Number, required: true, min: 1 },
     sourcePools: { type: [budgetAllocationSourcePoolSchema], required: true, default: [] },
+    parentSourcePools: { type: [budgetAllocationParentSourcePoolSchema], required: true, default: [] },
+    subAllocatedAmount: { type: Number, required: true, default: 0, min: 0 },
     // Defaults to APPROVED (see BudgetSetup model for the same reasoning) —
     // allocations created before this workflow existed already moved real
     // money via sourcePools, so they behave as already-approved rather than
@@ -158,6 +203,7 @@ const budgetAllocationSchema = new Schema<BudgetAllocationDocument>(
 );
 
 budgetAllocationSchema.index({ "sourcePools.budgetSetupId": 1 });
+budgetAllocationSchema.index({ "parentSourcePools.poolId": 1 });
 budgetAllocationSchema.index({ organizationRootNodeId: 1, schemeHeadRootNodeId: 1, financialYearId: 1 });
 budgetAllocationSchema.index({ organizationNodeId: 1 });
 budgetAllocationSchema.index({ headId: 1 });

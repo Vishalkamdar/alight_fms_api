@@ -25,7 +25,7 @@ import {
   type WorkflowSnapshot,
   type ActorForPermission,
 } from "./financial-workflow.service";
-import type { UserRole } from "../../models/User";
+import { UserModel, type UserRole } from "../../models/User";
 import type {
   BudgetSetupExportQuery,
   BudgetSetupListQuery,
@@ -60,6 +60,11 @@ interface FinancialYearRef {
   financialYear: string;
 }
 
+interface UserRef {
+  _id: string;
+  fullname: string;
+}
+
 export interface BudgetSetupAttachmentDto {
   _id: string;
   originalName: string;
@@ -87,6 +92,7 @@ export interface BudgetSetupDto {
   approvalStatus: ApprovalStatus;
   workflowSnapshot: WorkflowSnapshot;
   makerId: string | null;
+  maker: UserRef | null;
   verifierId: string | null;
   checkerId: string | null;
   holdingAmount: number;
@@ -109,10 +115,11 @@ export interface ListResult<T> {
 }
 
 async function buildLookupMaps() {
-  const [orgNodes, schemeHeadNodes, financialYears] = await Promise.all([
+  const [orgNodes, schemeHeadNodes, financialYears, makers] = await Promise.all([
     OrganizationNodeModel.find().select("name").lean(),
     SchemeHeadNodeModel.find().select("name").lean(),
     FinancialYearModel.find().select("financialYear").lean(),
+    UserModel.find().select("fullname").lean(),
   ]);
 
   return {
@@ -125,6 +132,7 @@ async function buildLookupMaps() {
     financialYearMap: new Map<string, FinancialYearRef>(
       financialYears.map((y) => [String(y._id), { _id: String(y._id), financialYear: y.financialYear }])
     ),
+    makerMap: new Map<string, UserRef>(makers.map((u) => [String(u._id), { _id: String(u._id), fullname: u.fullname }])),
   };
 }
 
@@ -135,6 +143,7 @@ function serialize(
   const financialYearId = String(doc.financialYearId);
   const organizationNodeId = String(doc.organizationNodeId);
   const schemeHeadNodeId = String(doc.schemeHeadNodeId);
+  const makerId = doc.makerId ? String(doc.makerId) : null;
 
   return {
     _id: String(doc._id),
@@ -160,7 +169,8 @@ function serialize(
     status: doc.status,
     approvalStatus: doc.approvalStatus,
     workflowSnapshot: doc.workflowSnapshot,
-    makerId: doc.makerId ? String(doc.makerId) : null,
+    makerId,
+    maker: makerId ? maps.makerMap.get(makerId) ?? null : null,
     verifierId: doc.verifierId ? String(doc.verifierId) : null,
     checkerId: doc.checkerId ? String(doc.checkerId) : null,
     holdingAmount: doc.holdingAmount,
@@ -270,6 +280,7 @@ interface AggregatedBudgetSetupRow {
   approvalStatus: ApprovalStatus;
   workflowSnapshot: WorkflowSnapshot;
   makerId: Types.ObjectId | null;
+  maker: { _id: Types.ObjectId; fullname: string } | null;
   verifierId: Types.ObjectId | null;
   checkerId: Types.ObjectId | null;
   holdingAmount: number;
@@ -318,6 +329,7 @@ function serializeAggregatedRow(row: AggregatedBudgetSetupRow): BudgetSetupDto {
     approvalStatus: row.approvalStatus,
     workflowSnapshot: row.workflowSnapshot,
     makerId: row.makerId ? String(row.makerId) : null,
+    maker: row.maker ? { _id: String(row.maker._id), fullname: row.maker.fullname } : null,
     verifierId: row.verifierId ? String(row.verifierId) : null,
     checkerId: row.checkerId ? String(row.checkerId) : null,
     holdingAmount: row.holdingAmount,
@@ -393,6 +405,15 @@ function buildBudgetSetupsPipeline(
       },
     },
     { $unwind: { path: "$financialYear", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "users",
+        let: { makerId: "$makerId" },
+        pipeline: [{ $match: { $expr: { $eq: ["$_id", "$$makerId"] } } }, { $project: { fullname: 1 } }],
+        as: "maker",
+      },
+    },
+    { $unwind: { path: "$maker", preserveNullAndEmptyArrays: true } },
     { $addFields: { remainingAmount: { $subtract: ["$originalAmount", "$allocatedAmount"] } } },
   ];
 

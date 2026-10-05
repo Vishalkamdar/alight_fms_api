@@ -2,6 +2,7 @@ import mongoose, { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
 import { logActivity } from "../../utils/activity-log";
 import { BudgetAllocationModel, type BudgetAllocationDocument } from "../../models/fms/BudgetAllocation";
+import { FundTransferModel } from "../../models/fms/FundTransfer";
 import { BudgetSetupModel } from "../../models/fms/BudgetSetup";
 import { OrganizationNodeModel } from "../../models/OrganizationNode";
 import { SchemeHeadNodeModel } from "../../models/SchemeHeadNode";
@@ -210,7 +211,7 @@ function serialize(
 }
 
 /** Walks parentNodeId up from `candidateId`; true if it reaches `ancestorId` (or is it). */
-async function isOrganizationNodeSelfOrDescendant(
+export async function isOrganizationNodeSelfOrDescendant(
   candidateId: string,
   ancestorId: string
 ): Promise<boolean> {
@@ -241,7 +242,7 @@ async function isSchemeHeadSelfOrDescendant(candidateId: string, ancestorId: str
   return candidate.hierarchyPath.startsWith(ancestorFullPath);
 }
 
-async function assertRootOrganizationNode(id: string): Promise<void> {
+export async function assertRootOrganizationNode(id: string): Promise<void> {
   const node = await OrganizationNodeModel.findById(id);
   if (!node) {
     throw new AppError(422, "The selected root Organization Node does not exist.", {
@@ -260,7 +261,7 @@ async function assertRootOrganizationNode(id: string): Promise<void> {
   }
 }
 
-async function assertRootSchemeHeadNode(id: string): Promise<void> {
+export async function assertRootSchemeHeadNode(id: string): Promise<void> {
   const node = await SchemeHeadNodeModel.findById(id);
   if (!node) {
     throw new AppError(422, "The selected root Scheme/Head Node does not exist.", {
@@ -783,6 +784,201 @@ async function reserveFromScope(
   return breakdown;
 }
 
+type ReceivedPoolKind = "BUDGET_ALLOCATION" | "FUND_TRANSFER";
+interface ReceivedPoolRef {
+  kind: ReceivedPoolKind;
+  poolId: Types.ObjectId;
+}
+export interface ReceivedPoolReservation extends ReceivedPoolRef {
+  amount: number;
+}
+
+/**
+ * Both models share the three fields this reservation logic touches
+ * (`amount`, `subAllocatedAmount`, `approvalStatus`) — narrowed to just
+ * those so a single code path can operate on either model's documents
+ * without TypeScript choking on their otherwise-unrelated full shapes.
+ */
+interface ReceivedPoolCollection {
+  findOneAndUpdate(filter: Record<string, unknown>, update: Record<string, unknown>, options: { session: mongoose.ClientSession }): Promise<unknown>;
+  findById(id: Types.ObjectId): {
+    session(s: mongoose.ClientSession): { select(fields: string): Promise<{ amount: number; subAllocatedAmount: number; approvalStatus: string } | null> };
+  };
+}
+
+function receivedPoolModel(kind: ReceivedPoolKind): ReceivedPoolCollection {
+  return (kind === "BUDGET_ALLOCATION" ? BudgetAllocationModel : FundTransferModel) as unknown as ReceivedPoolCollection;
+}
+
+/**
+ * Every pool `nodeId` can be said to have "received" — its own APPROVED
+ * BudgetAllocation record(s) AND any APPROVED FundTransfer(s) pulled/
+ * returned INTO it (see FundTransfer.ts) — oldest first across both. A node
+ * that received money purely via a Pull/Return is just as able to
+ * sub-allocate it onward, or itself pull/return it further up, as one that
+ * received it as a direct Budget Allocation.
+ */
+async function findReceivedPoolRefs(
+  nodeId: string,
+  scope: { financialYearId: Types.ObjectId | string; organizationRootNodeId: Types.ObjectId | string; schemeHeadRootNodeId: Types.ObjectId | string },
+  session: mongoose.ClientSession
+): Promise<ReceivedPoolRef[]> {
+  const matchBase = {
+    financialYearId: scope.financialYearId,
+    organizationRootNodeId: scope.organizationRootNodeId,
+    schemeHeadRootNodeId: scope.schemeHeadRootNodeId,
+    approvalStatus: "APPROVED" as const,
+  };
+  // Sequential, not Promise.all — a MongoDB session can only have one
+  // operation in flight at a time; running both queries concurrently on
+  // the same transaction session throws "ConflictingOperationInProgress".
+  const allocations = await BudgetAllocationModel.find({ ...matchBase, organizationNodeId: nodeId })
+    .session(session)
+    .sort({ createdAt: 1 })
+    .select("_id");
+  const transfers = await FundTransferModel.find({ ...matchBase, destinationNodeId: nodeId })
+    .session(session)
+    .sort({ createdAt: 1 })
+    .select("_id");
+  return [
+    ...allocations.map((doc) => ({ kind: "BUDGET_ALLOCATION" as const, poolId: doc._id })),
+    ...transfers.map((doc) => ({ kind: "FUND_TRANSFER" as const, poolId: doc._id })),
+  ];
+}
+
+/**
+ * Reserves up to `desiredAmount` of headroom from one specific received
+ * pool record, against its own `subAllocatedAmount` counter — the atomic
+ * `findOneAndUpdate` guard is what makes two concurrent draws against the
+ * same pool unable to jointly over-draw it (GLOBAL_RULES §10).
+ */
+async function reserveUpToFromReceivedPool(
+  ref: ReceivedPoolRef,
+  desiredAmount: number,
+  session: mongoose.ClientSession
+): Promise<number> {
+  if (desiredAmount <= 0) return 0;
+  const Model = receivedPoolModel(ref.kind);
+
+  const updated = await Model.findOneAndUpdate(
+    {
+      _id: ref.poolId,
+      approvalStatus: "APPROVED",
+      $expr: { $lte: [{ $add: ["$subAllocatedAmount", desiredAmount] }, "$amount"] },
+    },
+    { $inc: { subAllocatedAmount: desiredAmount } },
+    { session }
+  );
+  if (updated) return desiredAmount;
+
+  const pool = await Model.findById(ref.poolId).session(session).select("amount subAllocatedAmount approvalStatus");
+  if (!pool || pool.approvalStatus !== "APPROVED") return 0;
+  const actuallyRemaining = pool.amount - pool.subAllocatedAmount;
+  if (actuallyRemaining <= 0) return 0;
+
+  const retried = await Model.findOneAndUpdate(
+    {
+      _id: ref.poolId,
+      approvalStatus: "APPROVED",
+      $expr: { $lte: [{ $add: ["$subAllocatedAmount", actuallyRemaining] }, "$amount"] },
+    },
+    { $inc: { subAllocatedAmount: actuallyRemaining } },
+    { session }
+  );
+  return retried ? actuallyRemaining : 0;
+}
+
+/**
+ * Reserves `amount` out of what `nodeId` itself actually received (its own
+ * received pools, oldest first — see findReceivedPoolRefs) — the one shared
+ * capacity counter that every kind of outgoing commitment from this node
+ * draws against, whether that's sub-allocating further down to its own
+ * children (reserveFromParentIfNeeded below) or pulling/returning money
+ * back up to its parent (fund-transfer.service.ts). All of them draw from
+ * the exact same pool, so a node's total outgoing commitments can never
+ * jointly exceed what it actually received, regardless of which direction
+ * they go or how it originally arrived.
+ */
+export async function reserveFromNodeOwnReceivedPool(
+  nodeId: string,
+  amount: number,
+  scope: { financialYearId: Types.ObjectId | string; organizationRootNodeId: Types.ObjectId | string; schemeHeadRootNodeId: Types.ObjectId | string },
+  session: mongoose.ClientSession,
+  errorKeyPrefix = ""
+): Promise<ReceivedPoolReservation[]> {
+  const pools = await findReceivedPoolRefs(nodeId, scope, session);
+
+  if (pools.length === 0) {
+    throw new AppError(
+      422,
+      "This Organization Node has not received an approved Budget Allocation yet — there is nothing available.",
+      { [`${errorKeyPrefix}amount`]: ["Node has no approved budget to draw from."] }
+    );
+  }
+
+  let remaining = amount;
+  const breakdown: ReceivedPoolReservation[] = [];
+  for (const pool of pools) {
+    if (remaining <= 0) break;
+    const reserved = await reserveUpToFromReceivedPool(pool, remaining, session);
+    if (reserved > 0) {
+      breakdown.push({ ...pool, amount: reserved });
+      remaining -= reserved;
+    }
+  }
+
+  if (remaining > 0) {
+    const totalAvailable = amount - remaining;
+    throw new AppError(
+      409,
+      `Insufficient available budget. Maximum available amount is ${totalAvailable}.`,
+      { [`${errorKeyPrefix}amount`]: [`Only ${totalAvailable} remains available.`] }
+    );
+  }
+
+  return breakdown;
+}
+
+async function reserveFromParentIfNeeded(
+  organizationNodeId: string,
+  amount: number,
+  scope: ResolvedScope,
+  session: mongoose.ClientSession,
+  errorKeyPrefix = ""
+): Promise<ReceivedPoolReservation[]> {
+  const node = await OrganizationNodeModel.findById(organizationNodeId).session(session).select("parentNodeId");
+  if (!node?.parentNodeId) return [];
+  if (String(node.parentNodeId) === String(scope.organizationRootNodeId)) return [];
+
+  try {
+    return await reserveFromNodeOwnReceivedPool(String(node.parentNodeId), amount, scope, session, errorKeyPrefix);
+  } catch (error) {
+    if (error instanceof AppError && error.statusCode === 422) {
+      throw new AppError(
+        422,
+        "The parent Organization Node has not received an approved Budget Allocation yet — there is nothing available to sub-allocate from it.",
+        { [`${errorKeyPrefix}amount`]: ["Parent node has no approved budget to allocate from."] }
+      );
+    }
+    throw error;
+  }
+}
+
+/** Reverses every reservation made by `reserveFromNodeOwnReceivedPool`/`reserveFromParentIfNeeded` — symmetric, floored at the pool's own committed amount. */
+export async function releaseToParentPool(
+  parentSourcePools: ReceivedPoolReservation[],
+  session: mongoose.ClientSession
+): Promise<void> {
+  for (const pool of parentSourcePools) {
+    const Model = receivedPoolModel(pool.kind);
+    await Model.findOneAndUpdate(
+      { _id: pool.poolId, $expr: { $gte: ["$subAllocatedAmount", pool.amount] } },
+      { $inc: { subAllocatedAmount: -pool.amount } },
+      { session }
+    );
+  }
+}
+
 /**
  * Validates one (organizationNodeId, headId, amount) row against a resolved
  * scope and the live Require Head configuration. Shared by the single-row
@@ -885,6 +1081,7 @@ export async function createBudgetAllocation(
   try {
     const result = await session.withTransaction(async () => {
       const pools = await reserveFromScope(scope.poolIds, input.amount, context, session);
+      const parentPools = await reserveFromParentIfNeeded(input.organizationNodeId, input.amount, scope, session);
       const [doc] = await BudgetAllocationModel.create(
         [
           {
@@ -896,6 +1093,7 @@ export async function createBudgetAllocation(
             requireHeadAtCreation: requireHead,
             amount: input.amount,
             sourcePools: pools,
+            parentSourcePools: parentPools,
             approvalStatus: workflow.initialStatus,
             workflowSnapshot: workflow.snapshot,
             makerId: actorId,
@@ -981,13 +1179,15 @@ export async function createBulkBudgetAllocations(
     headId: Types.ObjectId | null;
     amount: number;
     workflow: Awaited<ReturnType<typeof resolveWorkflowForNode>>;
+    errorKeyPrefix: string;
   }> = [];
   for (let index = 0; index < input.rows.length; index += 1) {
     const row = input.rows[index];
-    const { headId } = await validateAllocationRow(scope, row, requireHead, `rows.${index}.`);
+    const errorKeyPrefix = `rows.${index}.`;
+    const { headId } = await validateAllocationRow(scope, row, requireHead, errorKeyPrefix);
     await assertMakerPermission({ actorId, actorRole }, row.organizationNodeId);
     const workflow = await resolveWorkflowForNode(row.organizationNodeId);
-    validatedRows.push({ organizationNodeId: row.organizationNodeId, headId, amount: row.amount, workflow });
+    validatedRows.push({ organizationNodeId: row.organizationNodeId, headId, amount: row.amount, workflow, errorKeyPrefix });
   }
 
   const totalAmount = validatedRows.reduce((sum, row) => sum + row.amount, 0);
@@ -1004,14 +1204,22 @@ export async function createBulkBudgetAllocations(
       const reservedRows: Array<{
         row: (typeof validatedRows)[number];
         sourcePools: Awaited<ReturnType<typeof reserveFromScope>>;
+        parentPools: Awaited<ReturnType<typeof reserveFromParentIfNeeded>>;
       }> = [];
       for (const row of validatedRows) {
         const sourcePools = await reserveFromScope(scope.poolIds, row.amount, context, session);
-        reservedRows.push({ row, sourcePools });
+        const parentPools = await reserveFromParentIfNeeded(
+          row.organizationNodeId,
+          row.amount,
+          scope,
+          session,
+          row.errorKeyPrefix
+        );
+        reservedRows.push({ row, sourcePools, parentPools });
       }
 
       const docs = await BudgetAllocationModel.create(
-        reservedRows.map(({ row, sourcePools }) => {
+        reservedRows.map(({ row, sourcePools, parentPools }) => {
           const autoApproved = row.workflow.initialStatus === "APPROVED";
           return {
             financialYearId: scope.financialYearId,
@@ -1022,6 +1230,7 @@ export async function createBulkBudgetAllocations(
             requireHeadAtCreation: requireHead,
             amount: row.amount,
             sourcePools,
+            parentSourcePools: parentPools,
             approvalStatus: row.workflow.initialStatus,
             workflowSnapshot: row.workflow.snapshot,
             makerId: actorId,
@@ -1365,6 +1574,7 @@ export async function rejectBudgetAllocation(
       for (const pool of doc.sourcePools) {
         await releaseBudgetAmount(String(pool.budgetSetupId), pool.amount, context, session);
       }
+      await releaseToParentPool(doc.parentSourcePools, session);
 
       doc.approvalStatus = isVerifierStage ? "REJECTED_BY_VERIFIER" : "REJECTED_BY_CHECKER";
       doc.rejectionReason = input.reason;
