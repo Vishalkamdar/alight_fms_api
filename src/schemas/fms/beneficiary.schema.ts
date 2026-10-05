@@ -1,7 +1,19 @@
 import { z } from "zod";
-import { objectIdSchema } from "../common.schema";
 import { BENEFICIARY_TYPES, PAYMENT_MODES, BANK_ACCOUNT_TYPES } from "../../models/fms/Beneficiary";
 import { INDIAN_STATES_AND_UTS } from "../../constants/indianStates";
+import { objectIdSchema } from "../common.schema";
+
+/**
+ * "GLOBAL" is a client-facing sentinel meaning "visible to every
+ * department" — it is never stored as-is; the service layer translates it
+ * to organizationNodeId: null and separately verifies the actor is allowed
+ * to use it (only Super Admin/Admin — see assertDepartmentScope in
+ * beneficiary.service.ts). A plain objectId means "this specific
+ * department," and omitting the field entirely lets the service default it
+ * (Global for SA/Admin, the actor's own department for a Maker).
+ */
+export const GLOBAL_DEPARTMENT_SENTINEL = "GLOBAL" as const;
+const departmentFieldSchema = z.union([objectIdSchema, z.literal(GLOBAL_DEPARTMENT_SENTINEL)]);
 
 // Standard Indian formats.
 const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
@@ -56,15 +68,21 @@ const baseBeneficiaryFields = {
   isActive: z.boolean().optional().default(true),
   paymentMode: z.enum(PAYMENT_MODES).optional().default("BANK"),
   bankAccounts: z.array(bankAccountSchema).max(20).optional().default([]),
+  organizationNodeId: departmentFieldSchema.optional(),
 };
 
 /**
- * Vendor requires GST (spec §2 — mandatory unless a future config exception
- * is added, which doesn't exist yet) and a Contact Person; Employee requires
- * an Employee ID and PAN but never GST — these per-type rules are the real
- * authorization/data-integrity boundary (§18 — a crafted request can't get
- * around them by omitting beneficiaryType-specific checks), so they're
- * enforced here in the schema, not just hinted at in the frontend form.
+ * Vendor requires a Contact Person; Employee requires an Employee ID and
+ * PAN but never GST — these per-type rules are the real authorization/
+ * data-integrity boundary (§18 — a crafted request can't get around them by
+ * omitting beneficiaryType-specific checks), so they're enforced here in
+ * the schema, not just hinted at in the frontend form.
+ *
+ * GST is deliberately NOT required for Vendor — plenty of real vendors
+ * (unregistered, below the GST threshold, individuals) legitimately have
+ * none. When a GST number IS provided it still has to be a validly
+ * formatted one (see gstNumber's own regex above); it's just never
+ * mandatory to have one at all.
  */
 function applyBeneficiaryTypeRules<T extends z.ZodTypeAny>(schema: T) {
   return schema.superRefine((data: z.infer<typeof schema>, ctx) => {
@@ -81,9 +99,6 @@ function applyBeneficiaryTypeRules<T extends z.ZodTypeAny>(schema: T) {
     if (d.beneficiaryType === "VENDOR") {
       if (!d.contactPersonName) {
         ctx.addIssue({ code: "custom", path: ["contactPersonName"], message: "Contact Person Name is required for a Vendor." });
-      }
-      if (!d.gstNumber) {
-        ctx.addIssue({ code: "custom", path: ["gstNumber"], message: "GST Number is required for a Vendor." });
       }
     } else {
       if (!d.employeeId) {
@@ -125,6 +140,7 @@ export const beneficiaryListQuerySchema = z.object({
   gstNumber: z.string().trim().max(15).optional(),
   state: z.enum(INDIAN_STATES_AND_UTS).optional(),
   city: z.string().trim().max(100).optional(),
+  organizationNodeId: departmentFieldSchema.optional(),
   isActive: z.coerce.boolean().optional(),
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
@@ -135,6 +151,10 @@ export const beneficiaryListQuerySchema = z.object({
 });
 
 export const beneficiaryExportQuerySchema = beneficiaryListQuerySchema.omit({ page: true, limit: true });
+
+export const setBeneficiaryActiveSchema = z.object({
+  isActive: z.boolean(),
+});
 
 export type CreateBeneficiaryInput = z.infer<typeof createBeneficiarySchema>;
 export type UpdateBeneficiaryInput = z.infer<typeof updateBeneficiarySchema>;

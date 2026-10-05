@@ -36,6 +36,16 @@ export interface BankAccount {
 export interface BeneficiaryDocument extends Document {
   _id: Types.ObjectId;
   beneficiaryType: BeneficiaryType;
+  /**
+   * Which Organization Node (department) this beneficiary belongs to —
+   * `null` means Global: visible to and usable by every department, not
+   * just one. Only Super Admin/Admin may create or leave a beneficiary
+   * Global; an FMS Operational User - Maker can only ever set this to one
+   * of their own assigned department(s), never null and never another
+   * department's node (enforced in beneficiary.service.ts, never trusted
+   * from the client — see assertDepartmentScope).
+   */
+  organizationNodeId: Types.ObjectId | null;
   // Vendor Name / Employee Name — same field, meaning depends on type.
   name: string;
   // Vendor-only.
@@ -78,6 +88,7 @@ const bankAccountSchema = new Schema<BankAccount>(
 const beneficiarySchema = new Schema<BeneficiaryDocument>(
   {
     beneficiaryType: { type: String, enum: BENEFICIARY_TYPES, required: true },
+    organizationNodeId: { type: Schema.Types.ObjectId, ref: "OrganizationNode", default: null },
     name: { type: String, required: true, trim: true, maxlength: 200 },
     contactPersonName: { type: String, trim: true, maxlength: 150, default: null },
     gstNumber: { type: String, trim: true, uppercase: true, maxlength: 15, default: null },
@@ -107,6 +118,7 @@ beneficiarySchema.index({ beneficiaryType: 1, gstNumber: 1 });
 beneficiarySchema.index({ beneficiaryType: 1, panNumber: 1 });
 beneficiarySchema.index({ beneficiaryType: 1, employeeId: 1 });
 beneficiarySchema.index({ isActive: 1 });
+beneficiarySchema.index({ organizationNodeId: 1 });
 beneficiarySchema.index({ state: 1 });
 beneficiarySchema.index({ createdAt: -1 });
 
