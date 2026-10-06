@@ -15,6 +15,9 @@ import budgetSetupRoutes from "./fms/budget-setup.routes";
 import budgetAllocationRoutes from "./fms/budget-allocation.routes";
 import fundTransferRoutes from "./fms/fund-transfer.routes";
 import beneficiaryRoutes from "./fms/beneficiary.routes";
+import deductionMasterRoutes from "./fms/deduction-master.routes";
+import expenditureRoutes from "./fms/expenditure.routes";
+import payrollRoutes from "./fms/payroll.routes";
 import approvalsRoutes from "./fms/approvals.routes";
 import activityLogRoutes from "./activity-log.routes";
 
@@ -36,6 +39,9 @@ router.use("/fms/budget-setups", budgetSetupRoutes);
 router.use("/fms/budget-allocations", budgetAllocationRoutes);
 router.use("/fms/fund-transfers", fundTransferRoutes);
 router.use("/fms/beneficiaries", beneficiaryRoutes);
+router.use("/fms/deduction-masters", deductionMasterRoutes);
+router.use("/fms/expenditures", expenditureRoutes);
+router.use("/fms/payroll-batches", payrollRoutes);
 router.use("/fms/approvals", approvalsRoutes);
 // Exposes /fms/user-node-roles, /fms/users/:userId/nodes, /fms/nodes/:nodeId/users,
 // /fms/my-nodes, and /fms/my-nodes/:nodeId/role.

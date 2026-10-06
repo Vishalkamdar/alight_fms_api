@@ -130,3 +130,67 @@ export const uploadBudgetAllocationDocument = multer({
     callback(null, true);
   },
 }).single("document");
+
+/**
+ * Disk storage for Expenditure bill/voucher reference documents (same file
+ * type/size constraints as Budget Setup/Allocation's documents, kept in its
+ * own directory so the modules' uploads never collide by filename).
+ */
+const EXPENDITURE_DOCUMENTS_DIR = path.join(UPLOAD_ROOT_DIR, "expenditures");
+fs.mkdirSync(EXPENDITURE_DOCUMENTS_DIR, { recursive: true });
+
+const expenditureDocumentStorage = multer.diskStorage({
+  destination: (_req, _file, callback) => {
+    callback(null, EXPENDITURE_DOCUMENTS_DIR);
+  },
+  filename: (_req, file, callback) => {
+    const uniqueSuffix = crypto.randomBytes(8).toString("hex");
+    const extension = path.extname(file.originalname).toLowerCase() || ".pdf";
+    callback(null, `doc-${Date.now()}-${uniqueSuffix}${extension}`);
+  },
+});
+
+export const uploadExpenditureDocument = multer({
+  storage: expenditureDocumentStorage,
+  limits: { fileSize: MAX_DOCUMENT_SIZE_BYTES },
+  fileFilter: (_req, file, callback) => {
+    const extension = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_DOCUMENT_MIME_TYPES.has(file.mimetype) && !ALLOWED_DOCUMENT_EXTENSIONS.has(extension)) {
+      callback(new Error("Only PDF, DOC, or DOCX files are allowed."));
+      return;
+    }
+    callback(null, true);
+  },
+}).single("document");
+
+/**
+ * Disk storage for Payroll batch supporting documents (sanction letters,
+ * payroll sheets, etc.) — same constraints as Expenditure's documents, own
+ * directory so uploads never collide by filename.
+ */
+const PAYROLL_DOCUMENTS_DIR = path.join(UPLOAD_ROOT_DIR, "payroll-batches");
+fs.mkdirSync(PAYROLL_DOCUMENTS_DIR, { recursive: true });
+
+const payrollDocumentStorage = multer.diskStorage({
+  destination: (_req, _file, callback) => {
+    callback(null, PAYROLL_DOCUMENTS_DIR);
+  },
+  filename: (_req, file, callback) => {
+    const uniqueSuffix = crypto.randomBytes(8).toString("hex");
+    const extension = path.extname(file.originalname).toLowerCase() || ".pdf";
+    callback(null, `doc-${Date.now()}-${uniqueSuffix}${extension}`);
+  },
+});
+
+export const uploadPayrollDocument = multer({
+  storage: payrollDocumentStorage,
+  limits: { fileSize: MAX_DOCUMENT_SIZE_BYTES },
+  fileFilter: (_req, file, callback) => {
+    const extension = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_DOCUMENT_MIME_TYPES.has(file.mimetype) && !ALLOWED_DOCUMENT_EXTENSIONS.has(extension)) {
+      callback(new Error("Only PDF, DOC, or DOCX files are allowed."));
+      return;
+    }
+    callback(null, true);
+  },
+}).single("document");

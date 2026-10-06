@@ -1,6 +1,6 @@
 import { Schema, model, Document, Types } from "mongoose";
 
-export const FINANCIAL_WORKFLOW_MODULES = ["BUDGET_SETUP", "BUDGET_ALLOCATION", "FUND_TRANSFER"] as const;
+export const FINANCIAL_WORKFLOW_MODULES = ["BUDGET_SETUP", "BUDGET_ALLOCATION", "FUND_TRANSFER", "EXPENDITURE", "PAYROLL"] as const;
 export type FinancialWorkflowModule = (typeof FINANCIAL_WORKFLOW_MODULES)[number];
 
 /**

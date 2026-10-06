@@ -16,12 +16,17 @@ const router = Router();
 
 router.use(authenticate);
 
-// Master data used later by Payments/salary transactions — managed by
-// Super Admin and Admin only, same tier as Manage Users and Master Setup.
-const canManage = authorizeRoles("Super Admin", "Admin");
+// Master data used later by Payments/salary transactions — Super Admin and
+// Admin manage the full set (and may mark records Global); an FMS
+// Operational User - Maker may also create/manage Vendors & Employees, but
+// is scoped to their own Department by the service layer (see
+// beneficiary.service.ts's allowedNodeIds / resolveDepartmentNode), never
+// trusting the client to have enforced that boundary itself.
+const canManage = authorizeRoles("Super Admin", "Admin", "FMS Operational User - Maker");
 
 // Must be registered before "/:id" so these static segments aren't captured as an id.
 router.get("/export", canManage, validate(beneficiaryExportQuerySchema, "query"), controller.exportBeneficiaries);
+router.get("/my-departments", canManage, controller.getMyDepartments);
 router.post("/vendors/bulk-import", canManage, controller.bulkImportVendors);
 router.post("/employees/bulk-import", canManage, controller.bulkImportEmployees);
 
