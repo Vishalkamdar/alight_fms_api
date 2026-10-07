@@ -11,6 +11,7 @@ import {
 } from "../../schemas/fms/payroll.schema";
 import { workflowApproveSchema, workflowRejectSchema, workflowVerifySchema } from "../../schemas/fms/financial-workflow.schema";
 import * as controller from "../../controllers/fms/payroll.controller";
+import * as bulkUploadController from "../../controllers/fms/payroll-bulk-upload.controller";
 
 const router = Router();
 
@@ -31,6 +32,8 @@ const canReject = authorizeRoles(
 const canRetryPayment = authorizeRoles("Super Admin", "Admin");
 
 // Must be registered before "/:id" so these static segments aren't captured as an id.
+router.get("/bulk-upload/template", canWrite, bulkUploadController.downloadPayrollBulkTemplate);
+router.post("/bulk-upload", canWrite, bulkUploadController.bulkUploadPayroll);
 router.get("/export", canWrite, validate(payrollExportQuerySchema, "query"), controller.exportPayrollBatches);
 router.get(
   "/pending",

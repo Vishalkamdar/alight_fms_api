@@ -19,6 +19,7 @@ import deductionMasterRoutes from "./fms/deduction-master.routes";
 import expenditureRoutes from "./fms/expenditure.routes";
 import payrollRoutes from "./fms/payroll.routes";
 import approvalsRoutes from "./fms/approvals.routes";
+import dashboardRoutes from "./fms/dashboard.routes";
 import activityLogRoutes from "./activity-log.routes";
 
 const router = Router();
@@ -43,6 +44,7 @@ router.use("/fms/deduction-masters", deductionMasterRoutes);
 router.use("/fms/expenditures", expenditureRoutes);
 router.use("/fms/payroll-batches", payrollRoutes);
 router.use("/fms/approvals", approvalsRoutes);
+router.use("/fms/dashboard", dashboardRoutes);
 // Exposes /fms/user-node-roles, /fms/users/:userId/nodes, /fms/nodes/:nodeId/users,
 // /fms/my-nodes, and /fms/my-nodes/:nodeId/role.
 router.use("/fms", userNodeRoleRoutes);

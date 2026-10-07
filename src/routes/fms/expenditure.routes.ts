@@ -10,6 +10,7 @@ import {
 } from "../../schemas/fms/expenditure.schema";
 import { workflowApproveSchema, workflowRejectSchema, workflowVerifySchema } from "../../schemas/fms/financial-workflow.schema";
 import * as controller from "../../controllers/fms/expenditure.controller";
+import * as bulkUploadController from "../../controllers/fms/expenditure-bulk-upload.controller";
 
 const router = Router();
 
@@ -30,6 +31,8 @@ const canReject = authorizeRoles(
 const canRetryPayment = authorizeRoles("Super Admin", "Admin");
 
 // Must be registered before "/:id" so these static segments aren't captured as an id.
+router.get("/bulk-upload/template", canWrite, bulkUploadController.downloadExpenditureBulkTemplate);
+router.post("/bulk-upload", canWrite, bulkUploadController.bulkUploadExpenditures);
 router.get("/export", canWrite, validate(expenditureExportQuerySchema, "query"), controller.exportExpenditures);
 router.get(
   "/pending",
