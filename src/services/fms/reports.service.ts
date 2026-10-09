@@ -11,10 +11,13 @@ import { OrganizationNodeModel } from "../../models/OrganizationNode";
 import { UserModel } from "../../models/User";
 import {
   nodeFilter,
+  headFilter,
   sumField,
   resolveRootNodeIds,
+  resolveHeadRootIds,
   resolveNodeRootMap,
   resolveEffectiveNodeIds,
+  resolveEffectiveHeadIds,
   getAllowedNodeIdsForReporting,
   resolveFinancialYear,
   resolveNames,
@@ -128,6 +131,7 @@ export async function getBudgetSummaryDrilldown(
 
 export async function getBudgetAllocationReport(filters: ReportFilters, actor: ReportActorContext) {
   const effectiveNodeIds = await resolveEffectiveNodeIds(actor, filters.organizationNodeId);
+  const effectiveHeadIds = await resolveEffectiveHeadIds(actor, filters.headId);
   return listBudgetAllocations(
     {
       financialYearId: filters.financialYearId,
@@ -144,7 +148,8 @@ export async function getBudgetAllocationReport(filters: ReportFilters, actor: R
       sortBy: filters.sortBy ?? "createdAt",
       sortOrder: filters.sortOrder,
     } as never,
-    effectiveNodeIds
+    effectiveNodeIds,
+    effectiveHeadIds
   );
 }
 
@@ -224,15 +229,21 @@ function buildCommonMatch(
   fyObjectId: Types.ObjectId,
   effectiveNodeIds: string[] | null,
   dateField: string,
-  // PayrollBatch has no per-record `headId` — only a root-pool
-  // `schemeHeadRootNodeId` — so a `headId` filter must never be applied to
-  // it (it would previously silently zero every result instead of being a
-  // no-op). Expenditure has a real `headId` field, so it defaults on.
-  supportsHeadId = true
+  // `null` (no Head restriction/filter) is a no-op, same contract as
+  // nodeFilter — already validated against the caller's allowed Head set by
+  // resolveEffectiveHeadIds before reaching here. Field name differs by
+  // model: Expenditure has a real per-record `headId`; PayrollBatch has
+  // none, only a root-pool `schemeHeadRootNodeId` — the caller resolves to
+  // the matching field name via `headIdField`.
+  effectiveHeadIds: string[] | null = null,
+  headIdField: "headId" | "schemeHeadRootNodeId" = "headId"
 ) {
-  const match: Record<string, unknown> = { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds) };
+  const match: Record<string, unknown> = {
+    financialYearId: fyObjectId,
+    ...nodeFilter(effectiveNodeIds),
+    ...headFilter(effectiveHeadIds, headIdField),
+  };
   if (filters.schemeHeadRootNodeId) match.schemeHeadRootNodeId = new Types.ObjectId(filters.schemeHeadRootNodeId);
-  if (supportsHeadId && filters.headId) match.headId = new Types.ObjectId(filters.headId);
   if (filters.beneficiaryId) match.beneficiaryId = new Types.ObjectId(filters.beneficiaryId);
   if (filters.beneficiaryType) match.beneficiaryType = filters.beneficiaryType;
   if (filters.status) match.approvalStatus = filters.status;
@@ -248,7 +259,8 @@ function buildCommonMatch(
 
 export async function getExpenditureReport(filters: ReportFilters, actor: ReportActorContext): Promise<ListResult<ExpenditureReportRow>> {
   const { fyObjectId, effectiveNodeIds } = await scope(actor, filters);
-  const match = buildCommonMatch(filters, fyObjectId, effectiveNodeIds, "billVoucherDate");
+  const effectiveHeadIds = await resolveEffectiveHeadIds(actor, filters.headId);
+  const match = buildCommonMatch(filters, fyObjectId, effectiveNodeIds, "billVoucherDate", effectiveHeadIds, "headId");
 
   const [docs, total] = await Promise.all([
     ExpenditureModel.find(match)
@@ -316,7 +328,12 @@ export interface PayrollReportRow {
 
 export async function getPayrollReport(filters: ReportFilters, actor: ReportActorContext): Promise<ListResult<PayrollReportRow>> {
   const { fyObjectId, effectiveNodeIds } = await scope(actor, filters);
-  const match = buildCommonMatch(filters, fyObjectId, effectiveNodeIds, "createdAt", false);
+  const effectiveHeadIds = await resolveEffectiveHeadIds(actor, filters.headId);
+  // PayrollBatch has no per-record headId, only a root-pool
+  // schemeHeadRootNodeId — resolve each allowed/requested head up to its
+  // own scheme root first (same approach as the Dashboard's Payroll Overview).
+  const payrollHeadRootIds = effectiveHeadIds === null ? null : await resolveHeadRootIds(effectiveHeadIds);
+  const match = buildCommonMatch(filters, fyObjectId, effectiveNodeIds, "createdAt", payrollHeadRootIds, "schemeHeadRootNodeId");
 
   const [docs, total] = await Promise.all([
     PayrollBatchModel.find(match)

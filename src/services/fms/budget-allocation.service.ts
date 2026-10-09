@@ -403,7 +403,12 @@ function serializeAggregatedRow(row: AggregatedBudgetAllocationRow): BudgetAlloc
  */
 function buildBudgetAllocationsPipeline(
   query: BudgetAllocationListQuery | BudgetAllocationExportQuery,
-  allowedNodeIds?: string[] | null
+  allowedNodeIds?: string[] | null,
+  // Reports-only — Budget Management's own list/export never passes this,
+  // so existing behavior there is unchanged. Validated against the
+  // caller's allowed Head set by reports.service.ts's resolveEffectiveHeadIds
+  // before reaching here (never trusts query.headId directly on its own).
+  allowedHeadIds?: string[] | null
 ): mongoose.PipelineStage[] {
   const match: Record<string, unknown> = {};
   if (query.financialYearId) match.financialYearId = new Types.ObjectId(query.financialYearId);
@@ -437,6 +442,12 @@ function buildBudgetAllocationsPipeline(
     match.organizationNodeId = match.organizationNodeId
       ? { $eq: match.organizationNodeId, $in: allowedObjectIds }
       : { $in: allowedObjectIds };
+  }
+  if (allowedHeadIds) {
+    const allowedHeadObjectIds = allowedHeadIds.map((id) => new Types.ObjectId(id));
+    match.headId = match.headId
+      ? { $eq: match.headId, $in: allowedHeadObjectIds }
+      : { $in: allowedHeadObjectIds };
   }
 
   const pipeline: mongoose.PipelineStage[] = [
@@ -505,9 +516,10 @@ function buildBudgetAllocationsPipeline(
 
 export async function listBudgetAllocations(
   query: BudgetAllocationListQuery,
-  allowedNodeIds?: string[] | null
+  allowedNodeIds?: string[] | null,
+  allowedHeadIds?: string[] | null
 ): Promise<ListResult<BudgetAllocationDto>> {
-  const pipeline = buildBudgetAllocationsPipeline(query, allowedNodeIds);
+  const pipeline = buildBudgetAllocationsPipeline(query, allowedNodeIds, allowedHeadIds);
 
   const [result] = await BudgetAllocationModel.aggregate([
     ...pipeline,

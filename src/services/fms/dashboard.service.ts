@@ -44,7 +44,21 @@ export interface BudgetKpis {
   totalPayroll: number;
 }
 
-export async function getBudgetKpis(fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null): Promise<BudgetKpis> {
+export async function getBudgetKpis(
+  fyObjectId: Types.ObjectId,
+  effectiveNodeIds: string[] | null,
+  effectiveHeadIds: string[] | null = null
+): Promise<BudgetKpis> {
+  // headFilter defaults to the "headId" field, present on Expenditure,
+  // BudgetAllocation, and FundTransfer. BudgetSetup uses "schemeHeadNodeId"
+  // instead. PayrollBatch has neither — only a root-pool
+  // "schemeHeadRootNodeId" — so a Head restriction narrows Payroll by
+  // resolving each restricted head up to its own scheme root first.
+  const headMatch = headFilter(effectiveHeadIds);
+  const headMatchSetup = headFilter(effectiveHeadIds, "schemeHeadNodeId");
+  const payrollHeadRootIds = effectiveHeadIds === null ? null : await resolveHeadRootIds(effectiveHeadIds);
+  const payrollHeadMatch = headFilter(payrollHeadRootIds, "schemeHeadRootNodeId");
+
   // Budget Setup records only ever exist at a root node, but that's never a
   // reason to widen a node-scoped user's own "Total Budget" up to the whole
   // org's root pool (§1 — a child's scope must never implicitly include its
@@ -55,10 +69,11 @@ export async function getBudgetKpis(fyObjectId: Types.ObjectId, effectiveNodeIds
   const totalBudget = await sumField(BudgetSetupModel, "originalAmount", {
     financialYearId: fyObjectId,
     ...nodeFilter(effectiveNodeIds, "organizationNodeId"),
+    ...headMatchSetup,
   });
 
   const [allocationAgg] = await BudgetAllocationModel.aggregate<{ _id: null; amount: number; subAllocated: number }>([
-    { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeFilter(effectiveNodeIds) } },
+    { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeFilter(effectiveNodeIds), ...headMatch } },
     { $group: { _id: null, amount: { $sum: "$amount" }, subAllocated: { $sum: "$subAllocatedAmount" } } },
   ]);
   const allocated = allocationAgg?.amount ?? 0;
@@ -70,17 +85,17 @@ export async function getBudgetKpis(fyObjectId: Types.ObjectId, effectiveNodeIds
 
   const pendingMatch = { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES } };
   const [onHoldExpenditure, onHoldPayroll, onHoldAllocation, onHoldSetup, onHoldTransfer] = await Promise.all([
-    sumField(ExpenditureModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds) }),
-    sumField(PayrollBatchModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds) }),
-    sumField(BudgetAllocationModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds) }),
-    sumField(BudgetSetupModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds, "organizationNodeId") }),
-    sumField(FundTransferModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds, "destinationNodeId") }),
+    sumField(ExpenditureModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds), ...headMatch }),
+    sumField(PayrollBatchModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds), ...payrollHeadMatch }),
+    sumField(BudgetAllocationModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds), ...headMatch }),
+    sumField(BudgetSetupModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds, "organizationNodeId"), ...headMatchSetup }),
+    sumField(FundTransferModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds, "destinationNodeId"), ...headMatch }),
   ]);
   const onHold = onHoldExpenditure + onHoldPayroll + onHoldAllocation + onHoldSetup + onHoldTransfer;
 
   const [totalExpenditure, totalPayroll] = await Promise.all([
-    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds) }),
-    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds) }),
+    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds), ...headMatch }),
+    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds), ...payrollHeadMatch }),
   ]);
 
   return { totalBudget, allocated, available, onHold, totalExpenditure, totalPayroll };
@@ -251,23 +266,28 @@ export interface NodeSummaryRow {
  * requested set (regardless of count — callers decide whether "only show
  * for >1 node" applies to them).
  */
-export async function computeNodeFinancialSummaries(fyObjectId: Types.ObjectId, nodeIds: string[] | null): Promise<NodeSummaryRow[]> {
+export async function computeNodeFinancialSummaries(
+  fyObjectId: Types.ObjectId,
+  nodeIds: string[] | null,
+  headIds: string[] | null = null
+): Promise<NodeSummaryRow[]> {
   const nodeMatch = nodeFilter(nodeIds);
+  const headMatch = headFilter(headIds);
   const [allocationRows, expenditureRows, onHoldExpRows, onHoldAllocRows, nodes] = await Promise.all([
     BudgetAllocationModel.aggregate<{ _id: Types.ObjectId; amount: number; subAllocated: number }>([
-      { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch } },
+      { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch, ...headMatch } },
       { $group: { _id: "$organizationNodeId", amount: { $sum: "$amount" }, subAllocated: { $sum: "$subAllocatedAmount" } } },
     ]),
     ExpenditureModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
-      { $match: { financialYearId: fyObjectId, ...nodeMatch } },
+      { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
       { $group: { _id: "$organizationNodeId", amount: { $sum: "$netPayableAmount" } } },
     ]),
     ExpenditureModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
-      { $match: { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch } },
+      { $match: { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...headMatch } },
       { $group: { _id: "$organizationNodeId", amount: { $sum: "$holdingAmount" } } },
     ]),
     BudgetAllocationModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
-      { $match: { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch } },
+      { $match: { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...headMatch } },
       { $group: { _id: "$organizationNodeId", amount: { $sum: "$holdingAmount" } } },
     ]),
     OrganizationNodeModel.find(nodeIds === null ? { status: "Active" } : { _id: { $in: toObjectIds(nodeIds) } })
@@ -301,9 +321,90 @@ export async function computeNodeFinancialSummaries(fyObjectId: Types.ObjectId, 
   });
 }
 
-async function getNodeSummaries(fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null): Promise<NodeSummaryRow[] | null> {
+async function getNodeSummaries(
+  fyObjectId: Types.ObjectId,
+  effectiveNodeIds: string[] | null,
+  effectiveHeadIds: string[] | null
+): Promise<NodeSummaryRow[] | null> {
   if (effectiveNodeIds !== null && effectiveNodeIds.length <= 1) return null;
-  return computeNodeFinancialSummaries(fyObjectId, effectiveNodeIds);
+  return computeNodeFinancialSummaries(fyObjectId, effectiveNodeIds, effectiveHeadIds);
+}
+
+// ---------------------------------------------------------------------------
+// §3b — Head-Wise Financial Summary (combined node+head filter, multi-head
+// users only) — mirrors computeNodeFinancialSummaries/getNodeSummaries
+// exactly, grouped by Head instead of Organization Node.
+// ---------------------------------------------------------------------------
+
+export interface HeadSummaryRow {
+  headId: string;
+  headName: string;
+  allocated: number;
+  available: number;
+  onHold: number;
+  expenditure: number;
+}
+
+export async function computeHeadFinancialSummaries(
+  fyObjectId: Types.ObjectId,
+  nodeIds: string[] | null,
+  headIds: string[] | null
+): Promise<HeadSummaryRow[]> {
+  const nodeMatch = nodeFilter(nodeIds);
+  const headMatch = headFilter(headIds);
+  const [allocationRows, expenditureRows, onHoldExpRows, onHoldAllocRows, heads] = await Promise.all([
+    BudgetAllocationModel.aggregate<{ _id: Types.ObjectId; amount: number; subAllocated: number }>([
+      { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch, ...headMatch } },
+      { $group: { _id: "$headId", amount: { $sum: "$amount" }, subAllocated: { $sum: "$subAllocatedAmount" } } },
+    ]),
+    ExpenditureModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
+      { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
+      { $group: { _id: "$headId", amount: { $sum: "$netPayableAmount" } } },
+    ]),
+    ExpenditureModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
+      { $match: { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...headMatch } },
+      { $group: { _id: "$headId", amount: { $sum: "$holdingAmount" } } },
+    ]),
+    BudgetAllocationModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
+      { $match: { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...headMatch } },
+      { $group: { _id: "$headId", amount: { $sum: "$holdingAmount" } } },
+    ]),
+    SchemeHeadNodeModel.find(headIds === null ? { status: "Active" } : { _id: { $in: toObjectIds(headIds) } })
+      .select("_id name")
+      .lean(),
+  ]);
+
+  const allocationMap = new Map(allocationRows.filter((r) => r._id).map((r) => [String(r._id), r]));
+  const expenditureMap = new Map(expenditureRows.filter((r) => r._id).map((r) => [String(r._id), r.amount]));
+  const onHoldMap = new Map<string, number>();
+  for (const r of [...onHoldExpRows, ...onHoldAllocRows]) {
+    if (!r._id) continue;
+    const key = String(r._id);
+    onHoldMap.set(key, (onHoldMap.get(key) ?? 0) + r.amount);
+  }
+
+  return heads.map((head) => {
+    const headId = String(head._id);
+    const allocation = allocationMap.get(headId);
+    const allocated = allocation?.amount ?? 0;
+    return {
+      headId,
+      headName: head.name,
+      allocated,
+      available: allocated - (allocation?.subAllocated ?? 0),
+      onHold: onHoldMap.get(headId) ?? 0,
+      expenditure: expenditureMap.get(headId) ?? 0,
+    };
+  });
+}
+
+async function getHeadSummaries(
+  fyObjectId: Types.ObjectId,
+  effectiveNodeIds: string[] | null,
+  effectiveHeadIds: string[] | null
+): Promise<HeadSummaryRow[] | null> {
+  if (effectiveHeadIds !== null && effectiveHeadIds.length <= 1) return null;
+  return computeHeadFinancialSummaries(fyObjectId, effectiveNodeIds, effectiveHeadIds);
 }
 
 // ---------------------------------------------------------------------------
@@ -329,19 +430,24 @@ export interface PayrollOverview {
   trend: OverviewTrendPoint[];
 }
 
-export async function getExpenditureOverview(fy: FinancialYearDocument, effectiveNodeIds: string[] | null): Promise<ExpenditureOverview> {
+export async function getExpenditureOverview(
+  fy: FinancialYearDocument,
+  effectiveNodeIds: string[] | null,
+  effectiveHeadIds: string[] | null = null
+): Promise<ExpenditureOverview> {
   const fyObjectId = fy._id;
   const nodeMatch = nodeFilter(effectiveNodeIds);
+  const headMatch = headFilter(effectiveHeadIds);
   const now = new Date();
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
   const [thisMonth, approved, pending, paid, trendRows] = await Promise.all([
-    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, billVoucherDate: { $gte: startOfMonth }, ...nodeMatch }),
-    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch }),
-    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch }),
-    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, paymentStatus: "PAYMENT_SUCCESS", ...nodeMatch }),
+    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, billVoucherDate: { $gte: startOfMonth }, ...nodeMatch, ...headMatch }),
+    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch, ...headMatch }),
+    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...headMatch }),
+    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, paymentStatus: "PAYMENT_SUCCESS", ...nodeMatch, ...headMatch }),
     ExpenditureModel.aggregate<{ _id: string; amount: number }>([
-      { $match: { financialYearId: fyObjectId, ...nodeMatch } },
+      { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
       { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$billVoucherDate", timezone: "UTC" } }, amount: { $sum: "$netPayableAmount" } } },
     ]),
   ]);
@@ -350,21 +456,27 @@ export async function getExpenditureOverview(fy: FinancialYearDocument, effectiv
   return { thisMonth, approved, pending, paid, trend: buildFiscalTrendFromMonthKeys(fy.startDate, trendByMonthKey) };
 }
 
-export async function getPayrollOverview(fy: FinancialYearDocument, effectiveNodeIds: string[] | null): Promise<PayrollOverview> {
+export async function getPayrollOverview(
+  fy: FinancialYearDocument,
+  effectiveNodeIds: string[] | null,
+  effectiveHeadIds: string[] | null = null
+): Promise<PayrollOverview> {
   const fyObjectId = fy._id;
   const nodeMatch = nodeFilter(effectiveNodeIds);
+  const payrollHeadRootIds = effectiveHeadIds === null ? null : await resolveHeadRootIds(effectiveHeadIds);
+  const headMatch = headFilter(payrollHeadRootIds, "schemeHeadRootNodeId");
   const currentMonthName = new Date().toLocaleString("en-US", { month: "long" });
 
   const [currentMonthPayroll, pendingApproval, paid, trendRows, employeeAgg] = await Promise.all([
-    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, month: currentMonthName, ...nodeMatch }),
-    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch }),
-    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, paymentStatus: "PAYMENT_SUCCESS", ...nodeMatch }),
+    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, month: currentMonthName, ...nodeMatch, ...headMatch }),
+    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...headMatch }),
+    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, paymentStatus: "PAYMENT_SUCCESS", ...nodeMatch, ...headMatch }),
     PayrollBatchModel.aggregate<{ _id: string; amount: number }>([
-      { $match: { financialYearId: fyObjectId, ...nodeMatch } },
+      { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
       { $group: { _id: "$month", amount: { $sum: "$totalNetSalary" } } },
     ]),
     PayrollBatchModel.aggregate<{ _id: null; employeeIds: Types.ObjectId[] }>([
-      { $match: { financialYearId: fyObjectId, ...nodeMatch } },
+      { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
       { $unwind: "$employees" },
       { $group: { _id: null, employeeIds: { $addToSet: "$employees.beneficiaryId" } } },
     ]),
@@ -561,17 +673,24 @@ function buildBudgetAlerts(budgetKpis: BudgetKpis, pendingApprovals: PendingAppr
   return alerts;
 }
 
-async function getExceptionAlerts(fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null): Promise<DashboardAlert[]> {
+async function getExceptionAlerts(
+  fyObjectId: Types.ObjectId,
+  effectiveNodeIds: string[] | null,
+  effectiveHeadIds: string[] | null = null
+): Promise<DashboardAlert[]> {
   const nodeMatch = nodeFilter(effectiveNodeIds);
+  const headMatch = headFilter(effectiveHeadIds);
+  const payrollHeadRootIds = effectiveHeadIds === null ? null : await resolveHeadRootIds(effectiveHeadIds);
+  const payrollHeadMatch = headFilter(payrollHeadRootIds, "schemeHeadRootNodeId");
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
 
   const [failedExpenditure, failedPayroll, rejectedExpenditure, rejectedPayroll, unprocessedPayroll] = await Promise.all([
-    ExpenditureModel.countDocuments({ financialYearId: fyObjectId, paymentStatus: "PAYMENT_FAILED", ...nodeMatch }),
-    PayrollBatchModel.countDocuments({ financialYearId: fyObjectId, paymentStatus: "PAYMENT_FAILED", ...nodeMatch }),
-    ExpenditureModel.countDocuments({ financialYearId: fyObjectId, approvalStatus: { $in: REJECTED_STATUSES }, updatedAt: { $gte: thirtyDaysAgo }, ...nodeMatch }),
-    PayrollBatchModel.countDocuments({ financialYearId: fyObjectId, approvalStatus: { $in: REJECTED_STATUSES }, updatedAt: { $gte: thirtyDaysAgo }, ...nodeMatch }),
-    PayrollBatchModel.countDocuments({ financialYearId: fyObjectId, approvalStatus: "APPROVED", paymentStatus: { $ne: "PAYMENT_SUCCESS" }, approvedAt: { $lte: twoDaysAgo }, ...nodeMatch }),
+    ExpenditureModel.countDocuments({ financialYearId: fyObjectId, paymentStatus: "PAYMENT_FAILED", ...nodeMatch, ...headMatch }),
+    PayrollBatchModel.countDocuments({ financialYearId: fyObjectId, paymentStatus: "PAYMENT_FAILED", ...nodeMatch, ...payrollHeadMatch }),
+    ExpenditureModel.countDocuments({ financialYearId: fyObjectId, approvalStatus: { $in: REJECTED_STATUSES }, updatedAt: { $gte: thirtyDaysAgo }, ...nodeMatch, ...headMatch }),
+    PayrollBatchModel.countDocuments({ financialYearId: fyObjectId, approvalStatus: { $in: REJECTED_STATUSES }, updatedAt: { $gte: thirtyDaysAgo }, ...nodeMatch, ...payrollHeadMatch }),
+    PayrollBatchModel.countDocuments({ financialYearId: fyObjectId, approvalStatus: "APPROVED", paymentStatus: { $ne: "PAYMENT_SUCCESS" }, approvedAt: { $lte: twoDaysAgo }, ...nodeMatch, ...payrollHeadMatch }),
   ]);
 
   const alerts: DashboardAlert[] = [];
@@ -588,12 +707,13 @@ async function getExceptionAlerts(fyObjectId: Types.ObjectId, effectiveNodeIds: 
 // ---------------------------------------------------------------------------
 
 export interface DashboardDto {
-  scope: { organizationNodeId: string | null };
+  scope: { organizationNodeId: string | null; headId: string | null };
   financialYear: { _id: string; financialYear: string };
   budgetKpis: BudgetKpis;
   approvalKpis: ApprovalKpis;
   pendingApprovals: PendingApprovalCounts;
   nodeSummaries: NodeSummaryRow[] | null;
+  headSummaries: HeadSummaryRow[] | null;
   expenditureOverview: ExpenditureOverview;
   payrollOverview: PayrollOverview;
   recentTransactions: RecentTransaction[];
@@ -604,32 +724,35 @@ export async function getDashboardData(query: DashboardQuery, actor: ActorContex
   const fy = await resolveFinancialYear(query.financialYearId);
   const fyObjectId = fy._id;
   const effectiveNodeIds = await resolveEffectiveNodeIds(actor, query.organizationNodeId);
+  const effectiveHeadIds = await resolveEffectiveHeadIds(actor, query.headId);
 
-  const [budgetKpis, approvalKpis, pendingApprovals, nodeSummaries, expenditureOverview, payrollOverview, recentTransactions, exceptionAlerts] = await Promise.all([
-    getBudgetKpis(fyObjectId, effectiveNodeIds),
+  const [budgetKpis, approvalKpis, pendingApprovals, nodeSummaries, headSummaries, expenditureOverview, payrollOverview, recentTransactions, exceptionAlerts] = await Promise.all([
+    getBudgetKpis(fyObjectId, effectiveNodeIds, effectiveHeadIds),
     getApprovalKpis(actor, fyObjectId, effectiveNodeIds),
     getPendingApprovalCounts(actor, fyObjectId, effectiveNodeIds),
-    getNodeSummaries(fyObjectId, effectiveNodeIds),
-    getExpenditureOverview(fy, effectiveNodeIds),
-    getPayrollOverview(fy, effectiveNodeIds),
+    getNodeSummaries(fyObjectId, effectiveNodeIds, effectiveHeadIds),
+    getHeadSummaries(fyObjectId, effectiveNodeIds, effectiveHeadIds),
+    getExpenditureOverview(fy, effectiveNodeIds, effectiveHeadIds),
+    getPayrollOverview(fy, effectiveNodeIds, effectiveHeadIds),
     getRecentTransactions(fyObjectId, effectiveNodeIds, {
       module: query.module,
       status: query.status,
       dateFrom: query.dateFrom,
       dateTo: query.dateTo,
     }),
-    getExceptionAlerts(fyObjectId, effectiveNodeIds),
+    getExceptionAlerts(fyObjectId, effectiveNodeIds, effectiveHeadIds),
   ]);
 
   const alerts = [...buildBudgetAlerts(budgetKpis, pendingApprovals, nodeSummaries), ...exceptionAlerts];
 
   return {
-    scope: { organizationNodeId: query.organizationNodeId ?? null },
+    scope: { organizationNodeId: query.organizationNodeId ?? null, headId: query.headId ?? null },
     financialYear: { _id: String(fy._id), financialYear: fy.financialYear },
     budgetKpis,
     approvalKpis,
     pendingApprovals,
     nodeSummaries,
+    headSummaries,
     expenditureOverview,
     payrollOverview,
     recentTransactions,
