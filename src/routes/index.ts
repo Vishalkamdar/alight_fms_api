@@ -4,6 +4,7 @@ import usersRoutes from "./users.routes";
 import nodeTypeRoutes from "./node-type.routes";
 import organizationNodeRoutes from "./organization-node.routes";
 import userNodeRoleRoutes from "./fms/user-node-role.routes";
+import userHeadRoleRoutes from "./fms/user-head-role.routes";
 import nodeRoleConfigRoutes from "./fms/node-role-config.routes";
 import systemConfigRoutes from "./fms/system-config.routes";
 import schemeHeadNodeRoutes from "./fms/scheme-head-node.routes";
@@ -50,5 +51,7 @@ router.use("/fms/reports", reportsRoutes);
 // Exposes /fms/user-node-roles, /fms/users/:userId/nodes, /fms/nodes/:nodeId/users,
 // /fms/my-nodes, and /fms/my-nodes/:nodeId/role.
 router.use("/fms", userNodeRoleRoutes);
+// Exposes /fms/user-head-roles, /fms/users/:userId/heads, and /fms/my-heads.
+router.use("/fms", userHeadRoleRoutes);
 
 export default router;

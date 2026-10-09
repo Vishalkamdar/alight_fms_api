@@ -7,6 +7,7 @@ export type DashboardModule = (typeof DASHBOARD_MODULES)[number];
 export const dashboardQuerySchema = z.object({
   financialYearId: objectIdSchema.optional(),
   organizationNodeId: objectIdSchema.optional(),
+  headId: objectIdSchema.optional(),
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
   module: z.enum(DASHBOARD_MODULES).optional(),

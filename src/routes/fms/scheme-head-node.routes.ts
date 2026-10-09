@@ -10,6 +10,7 @@ import {
   updateSchemeHeadNodeStatusSchema,
 } from "../../schemas/fms/scheme-head-node.schema";
 import * as controller from "../../controllers/fms/scheme-head-node.controller";
+import { getMyAllocatableHeads } from "../../controllers/fms/user-head-role.controller";
 
 const router = Router();
 
@@ -29,8 +30,12 @@ const canRead = authorizeRoles(
 );
 const canWrite = authorizeRoles("Super Admin");
 
-// Must be registered before "/:id" so "tree" isn't captured as an id.
+// Must be registered before "/:id" so these static segments aren't captured as an id.
 router.get("/tree", canRead, controller.getSchemeHeadTree);
+// The authorization-backed, descendant-expanded shape the Dashboard/Reports
+// Head filter picker consumes — never the full unscoped tree above, for a
+// Head-restricted caller (mirrors budget-allocations/my-allocatable-nodes).
+router.get("/my-allocatable-heads", canRead, getMyAllocatableHeads);
 
 router.get(
   "/",

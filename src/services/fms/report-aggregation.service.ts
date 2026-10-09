@@ -1,9 +1,11 @@
 import mongoose, { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
 import { OrganizationNodeModel } from "../../models/OrganizationNode";
+import { SchemeHeadNodeModel } from "../../models/SchemeHeadNode";
 import { FinancialYearModel, type FinancialYearDocument } from "../../models/fms/FinancialYear";
 import { getCurrentFinancialYear } from "./financial-year.service";
-import { getAllowedNodeIdsForList, type ActorForPermission } from "./financial-workflow.service";
+import { getAllowedNodeIdsForList, getAllowedHeadIdsForList, type ActorForPermission } from "./financial-workflow.service";
+import { getUserNodes, getDescendantNodeIdsGovernedBy } from "../../utils/fms/node-permission";
 import type { UserRole } from "../../models/User";
 
 /**
@@ -30,6 +32,12 @@ export function toObjectIds(ids: string[]): Types.ObjectId[] {
 export function nodeFilter(nodeIds: string[] | null, field = "organizationNodeId"): Record<string, unknown> {
   if (nodeIds === null) return {};
   return { [field]: { $in: toObjectIds(nodeIds) } };
+}
+
+/** Sibling to nodeFilter, same contract — `null` = unrestricted (every Head). */
+export function headFilter(headIds: string[] | null, field = "headId"): Record<string, unknown> {
+  if (headIds === null) return {};
+  return { [field]: { $in: toObjectIds(headIds) } };
 }
 
 export async function sumField(Model: mongoose.Model<any>, field: string, match: Record<string, unknown>): Promise<number> {
@@ -69,13 +77,64 @@ export async function resolveRootNodeIds(nodeIds: string[]): Promise<string[]> {
   return [...new Set(map.values())];
 }
 
+/**
+ * Every Scheme/Head root a head id resolves up to, deduplicated — used to
+ * filter PayrollBatch's head-wise scope, since it only ever stores a
+ * root-pool `schemeHeadRootNodeId` reference, never a per-record headId
+ * finer-grained than that. `hierarchyPath` already encodes full ancestry
+ * ("/root/.../parent/"), so the root is simply its first segment (or the
+ * head itself when hierarchyPath is "/", i.e. the head IS a root).
+ */
+export async function resolveHeadRootIds(headIds: string[]): Promise<string[]> {
+  const heads = await SchemeHeadNodeModel.find({ _id: { $in: headIds } }).select("_id hierarchyPath").lean();
+  const roots = new Set<string>();
+  for (const head of heads) {
+    const segments = head.hierarchyPath.split("/").filter(Boolean);
+    roots.add(segments.length > 0 ? segments[0] : String(head._id));
+  }
+  return [...roots];
+}
+
+/**
+ * Dashboard/Reports-only variant of `getAllowedNodeIdsForList` — that
+ * shared helper returns `null` (unrestricted) for Admin unconditionally,
+ * which is also relied on by Budget Setup/Allocation/Expenditure/Payroll/
+ * Beneficiary's own list/export screens (out of scope for this change).
+ * Here specifically, an Admin with at least one active `FmsUserNodeRole`
+ * assignment (any role — Admin isn't tied to one of Maker/Verifier/
+ * Checker, so this is a role-agnostic union of every node they hold any
+ * assignment on) is scoped to that assignment set, descendant-expanded the
+ * same way Maker/Verifier/Checker already are; an Admin with zero
+ * assignments stays unrestricted, so an existing unassigned Admin sees no
+ * behavior change.
+ */
+export async function getAllowedNodeIdsForReporting(actor: ReportActorContext): Promise<string[] | null> {
+  if (actor.actorRole === "Admin") {
+    const nodes = await getUserNodes(actor.actorId);
+    if (nodes.length === 0) return null;
+    const assignedNodeIds = [...new Set(nodes.map((node) => node.nodeId))];
+    return getDescendantNodeIdsGovernedBy(assignedNodeIds);
+  }
+  return getAllowedNodeIdsForList(actor);
+}
+
 export async function resolveEffectiveNodeIds(actor: ReportActorContext, requestedNodeId: string | undefined): Promise<string[] | null> {
-  const allowed = await getAllowedNodeIdsForList(actor);
+  const allowed = await getAllowedNodeIdsForReporting(actor);
   if (!requestedNodeId) return allowed;
   if (allowed !== null && !allowed.includes(requestedNodeId)) {
     throw new AppError(403, "You do not have access to this Organization Node.");
   }
   return [requestedNodeId];
+}
+
+/** Head-wise counterpart to resolveEffectiveNodeIds — same contract, same non-trust-the-client validation. */
+export async function resolveEffectiveHeadIds(actor: ReportActorContext, requestedHeadId: string | undefined): Promise<string[] | null> {
+  const allowed = await getAllowedHeadIdsForList(actor);
+  if (!requestedHeadId) return allowed;
+  if (allowed !== null && !allowed.includes(requestedHeadId)) {
+    throw new AppError(403, "You do not have access to this Scheme/Head.");
+  }
+  return [requestedHeadId];
 }
 
 export async function resolveFinancialYear(financialYearId: string | undefined): Promise<FinancialYearDocument> {

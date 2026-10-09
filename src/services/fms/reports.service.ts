@@ -15,6 +15,7 @@ import {
   resolveRootNodeIds,
   resolveNodeRootMap,
   resolveEffectiveNodeIds,
+  getAllowedNodeIdsForReporting,
   resolveFinancialYear,
   resolveNames,
   type ReportActorContext,
@@ -218,10 +219,20 @@ export interface ExpenditureReportRow {
   paymentDate: Date | null;
 }
 
-function buildCommonMatch(filters: ReportFilters, fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null, dateField: string) {
+function buildCommonMatch(
+  filters: ReportFilters,
+  fyObjectId: Types.ObjectId,
+  effectiveNodeIds: string[] | null,
+  dateField: string,
+  // PayrollBatch has no per-record `headId` — only a root-pool
+  // `schemeHeadRootNodeId` — so a `headId` filter must never be applied to
+  // it (it would previously silently zero every result instead of being a
+  // no-op). Expenditure has a real `headId` field, so it defaults on.
+  supportsHeadId = true
+) {
   const match: Record<string, unknown> = { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds) };
   if (filters.schemeHeadRootNodeId) match.schemeHeadRootNodeId = new Types.ObjectId(filters.schemeHeadRootNodeId);
-  if (filters.headId) match.headId = new Types.ObjectId(filters.headId);
+  if (supportsHeadId && filters.headId) match.headId = new Types.ObjectId(filters.headId);
   if (filters.beneficiaryId) match.beneficiaryId = new Types.ObjectId(filters.beneficiaryId);
   if (filters.beneficiaryType) match.beneficiaryType = filters.beneficiaryType;
   if (filters.status) match.approvalStatus = filters.status;
@@ -305,7 +316,7 @@ export interface PayrollReportRow {
 
 export async function getPayrollReport(filters: ReportFilters, actor: ReportActorContext): Promise<ListResult<PayrollReportRow>> {
   const { fyObjectId, effectiveNodeIds } = await scope(actor, filters);
-  const match = buildCommonMatch(filters, fyObjectId, effectiveNodeIds, "createdAt");
+  const match = buildCommonMatch(filters, fyObjectId, effectiveNodeIds, "createdAt", false);
 
   const [docs, total] = await Promise.all([
     PayrollBatchModel.find(match)
@@ -373,8 +384,14 @@ export async function getEmployeePayrollDetail(payrollBatchId: string, actor: Re
   const batch = await PayrollBatchModel.findById(payrollBatchId);
   if (!batch) throw new AppError(404, "Payroll batch not found.");
 
-  const effectiveNodeIds = await resolveEffectiveNodeIds(actor, String(batch.organizationNodeId));
-  if (effectiveNodeIds !== null && !effectiveNodeIds.includes(String(batch.organizationNodeId))) {
+  // Deliberately not resolveEffectiveNodeIds(actor, batch.organizationNodeId)
+  // — that throws its own 403 the instant the id is out of scope, which
+  // would leak "this batch exists but you can't see it" via status code.
+  // Fetch the caller's allowed set directly and fold the mismatch into the
+  // same generic 404 an unknown id would get, same as every other
+  // existence-oracle-avoidance in this file.
+  const allowedNodeIds = await getAllowedNodeIdsForReporting(actor);
+  if (allowedNodeIds !== null && !allowedNodeIds.includes(String(batch.organizationNodeId))) {
     throw new AppError(404, "Payroll batch not found.");
   }
 

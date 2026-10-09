@@ -8,6 +8,7 @@ import {
   resolveGoverningNodeId,
   getDescendantNodeIdsGovernedBy,
 } from "../../utils/fms/node-permission";
+import { getUserHeads, getDescendantHeadIdsGovernedBy } from "../../utils/fms/head-permission";
 import { FmsNodeRoleConfigModel } from "../../models/fms/FmsNodeRoleConfig";
 import {
   FinancialWorkflowHistoryModel,
@@ -103,6 +104,23 @@ export async function getAllowedNodeIdsForList(actor: ActorForPermission): Promi
   const nodes = await getUserNodes(actor.actorId);
   const assignedNodeIds = nodes.filter((node) => node.role === fmsRole).map((node) => node.nodeId);
   return getDescendantNodeIdsGovernedBy(assignedNodeIds);
+}
+
+/**
+ * Scheme/Head-wise counterpart to getAllowedNodeIdsForList — but Head
+ * restriction is opt-in per user, not tied to system role at all: Super
+ * Admin and Admin are unrestricted, and so is EVERY OTHER role (Maker/
+ * Verifier/Checker included) as long as they have zero active
+ * FmsUserHeadRole rows — matching the spec's "when Head selection is
+ * optional, do not introduce a mandatory filter." Only a user with at
+ * least one explicit Head assignment gets restricted to it (+ descendant
+ * Heads).
+ */
+export async function getAllowedHeadIdsForList(actor: ActorForPermission): Promise<string[] | null> {
+  if (actor.actorRole === "Super Admin") return null;
+  const assignedHeadIds = await getUserHeads(actor.actorId);
+  if (assignedHeadIds.length === 0) return null;
+  return getDescendantHeadIdsGovernedBy(assignedHeadIds);
 }
 
 /**

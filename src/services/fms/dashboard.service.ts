@@ -15,15 +15,18 @@ import {
   FISCAL_MONTHS_FULL,
   toObjectIds,
   nodeFilter,
+  headFilter,
   sumField,
   countAndSum,
-  resolveRootNodeIds,
   resolveEffectiveNodeIds,
+  resolveEffectiveHeadIds,
+  resolveHeadRootIds,
   resolveFinancialYear,
   buildFiscalTrendFromMonthKeys,
   resolveNames,
   type ReportActorContext,
 } from "./report-aggregation.service";
+import { SchemeHeadNodeModel } from "../../models/SchemeHeadNode";
 import type { DashboardQuery } from "../../schemas/fms/dashboard.schema";
 
 type ActorContext = ReportActorContext;
@@ -42,11 +45,16 @@ export interface BudgetKpis {
 }
 
 export async function getBudgetKpis(fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null): Promise<BudgetKpis> {
-  const rootNodeIds = effectiveNodeIds === null ? null : await resolveRootNodeIds(effectiveNodeIds);
-
+  // Budget Setup records only ever exist at a root node, but that's never a
+  // reason to widen a node-scoped user's own "Total Budget" up to the whole
+  // org's root pool (§1 — a child's scope must never implicitly include its
+  // parent's data) — filter on effectiveNodeIds directly, same as every
+  // other field here. A non-root-assigned user correctly sees 0 here; they
+  // have no Budget Setup pool of their own, only what's been allocated to
+  // them (see `allocated`/`available` below).
   const totalBudget = await sumField(BudgetSetupModel, "originalAmount", {
     financialYearId: fyObjectId,
-    ...nodeFilter(rootNodeIds, "organizationNodeId"),
+    ...nodeFilter(effectiveNodeIds, "organizationNodeId"),
   });
 
   const [allocationAgg] = await BudgetAllocationModel.aggregate<{ _id: null; amount: number; subAllocated: number }>([
@@ -65,7 +73,7 @@ export async function getBudgetKpis(fyObjectId: Types.ObjectId, effectiveNodeIds
     sumField(ExpenditureModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds) }),
     sumField(PayrollBatchModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds) }),
     sumField(BudgetAllocationModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds) }),
-    sumField(BudgetSetupModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(rootNodeIds, "organizationNodeId") }),
+    sumField(BudgetSetupModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds, "organizationNodeId") }),
     sumField(FundTransferModel, "holdingAmount", { ...pendingMatch, ...nodeFilter(effectiveNodeIds, "destinationNodeId") }),
   ]);
   const onHold = onHoldExpenditure + onHoldPayroll + onHoldAllocation + onHoldSetup + onHoldTransfer;
@@ -146,12 +154,13 @@ async function getVerifierOrCheckerApprovalKpis(actor: ActorContext, fyObjectId:
   };
 }
 
-async function getAdminApprovalKpis(fyObjectId: Types.ObjectId): Promise<ApprovalKpis> {
+async function getAdminApprovalKpis(fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null): Promise<ApprovalKpis> {
+  const nodeMatch = nodeFilter(effectiveNodeIds);
   const [pendingVerification, pendingChecker, approved, rejected] = await Promise.all([
-    sumAcrossApprovalModules({ financialYearId: fyObjectId, approvalStatus: "PENDING_VERIFICATION" }),
-    sumAcrossApprovalModules({ financialYearId: fyObjectId, approvalStatus: "PENDING_CHECKER_APPROVAL" }),
-    sumAcrossApprovalModules({ financialYearId: fyObjectId, approvalStatus: "APPROVED" }),
-    sumAcrossApprovalModules({ financialYearId: fyObjectId, approvalStatus: { $in: REJECTED_STATUSES } }),
+    sumAcrossApprovalModules({ financialYearId: fyObjectId, approvalStatus: "PENDING_VERIFICATION", ...nodeMatch }),
+    sumAcrossApprovalModules({ financialYearId: fyObjectId, approvalStatus: "PENDING_CHECKER_APPROVAL", ...nodeMatch }),
+    sumAcrossApprovalModules({ financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch }),
+    sumAcrossApprovalModules({ financialYearId: fyObjectId, approvalStatus: { $in: REJECTED_STATUSES }, ...nodeMatch }),
   ]);
   return {
     role: "Admin",
@@ -171,9 +180,9 @@ function effectiveFmsRole(actor: ActorContext): "Maker" | "Verifier" | "Checker"
   return "Maker";
 }
 
-async function getApprovalKpis(actor: ActorContext, fyObjectId: Types.ObjectId): Promise<ApprovalKpis> {
+async function getApprovalKpis(actor: ActorContext, fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null): Promise<ApprovalKpis> {
   const role = effectiveFmsRole(actor);
-  if (role === "Admin") return getAdminApprovalKpis(fyObjectId);
+  if (role === "Admin") return getAdminApprovalKpis(fyObjectId, effectiveNodeIds);
   if (role === "Verifier" || role === "Checker") return getVerifierOrCheckerApprovalKpis(actor, fyObjectId, role);
   return getMakerApprovalKpis(actor, fyObjectId);
 }
@@ -200,7 +209,11 @@ async function countPerModule(match: Record<string, unknown>): Promise<PendingAp
   return { expenditure, payroll, budgetAllocation, budgetSetup, total: expenditure + payroll + budgetAllocation + budgetSetup };
 }
 
-async function getPendingApprovalCounts(actor: ActorContext, fyObjectId: Types.ObjectId): Promise<PendingApprovalCounts> {
+async function getPendingApprovalCounts(
+  actor: ActorContext,
+  fyObjectId: Types.ObjectId,
+  effectiveNodeIds: string[] | null
+): Promise<PendingApprovalCounts> {
   const role = effectiveFmsRole(actor);
 
   if (role === "Verifier" || role === "Checker") {
@@ -210,7 +223,7 @@ async function getPendingApprovalCounts(actor: ActorContext, fyObjectId: Types.O
     return countPerModule({ financialYearId: fyObjectId, approvalStatus: status, ...nodeMatch });
   }
   if (role === "Admin") {
-    return countPerModule({ financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES } });
+    return countPerModule({ financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeFilter(effectiveNodeIds) });
   }
   // Maker — their own entries still awaiting Verifier/Checker action.
   return countPerModule({ financialYearId: fyObjectId, makerId: actor.actorId, approvalStatus: { $in: PENDING_STATUSES } });
@@ -482,7 +495,7 @@ async function getRecentTransactions(
   }
 
   if (wants("BUDGET_SETUP")) {
-    const match: Record<string, unknown> = { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds === null ? null : await resolveRootNodeIds(effectiveNodeIds), "organizationNodeId") };
+    const match: Record<string, unknown> = { financialYearId: fyObjectId, ...nodeMatch };
     if (filters.status) match.approvalStatus = filters.status;
     if (Object.keys(dateRange).length > 0) match.createdAt = dateRange;
     const docs = await BudgetSetupModel.find(match)
@@ -594,8 +607,8 @@ export async function getDashboardData(query: DashboardQuery, actor: ActorContex
 
   const [budgetKpis, approvalKpis, pendingApprovals, nodeSummaries, expenditureOverview, payrollOverview, recentTransactions, exceptionAlerts] = await Promise.all([
     getBudgetKpis(fyObjectId, effectiveNodeIds),
-    getApprovalKpis(actor, fyObjectId),
-    getPendingApprovalCounts(actor, fyObjectId),
+    getApprovalKpis(actor, fyObjectId, effectiveNodeIds),
+    getPendingApprovalCounts(actor, fyObjectId, effectiveNodeIds),
     getNodeSummaries(fyObjectId, effectiveNodeIds),
     getExpenditureOverview(fy, effectiveNodeIds),
     getPayrollOverview(fy, effectiveNodeIds),
