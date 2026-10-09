@@ -609,6 +609,7 @@ export async function createPayrollBatch(input: CreatePayrollBatchInput, context
 export async function verifyPayrollBatch(id: string, input: { remarks?: string }, context: ActorContext): Promise<PayrollBatchDto> {
   const doc = await PayrollBatchModel.findById(id);
   if (!doc) throw new AppError(404, "Payroll batch not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_VERIFICATION") throw new AppError(422, "This Payroll batch is not pending verification.");
 
   const actorId = requireActorId(context);
@@ -658,6 +659,7 @@ export async function verifyPayrollBatch(id: string, input: { remarks?: string }
 export async function approvePayrollBatch(id: string, input: { remarks?: string }, context: ActorContext): Promise<PayrollBatchDto> {
   const doc = await PayrollBatchModel.findById(id);
   if (!doc) throw new AppError(404, "Payroll batch not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") throw new AppError(422, "This Payroll batch is not pending Checker approval.");
 
   const actorId = requireActorId(context);
@@ -702,6 +704,7 @@ export async function approvePayrollBatch(id: string, input: { remarks?: string 
 export async function rejectPayrollBatch(id: string, input: { reason: string }, context: ActorContext): Promise<PayrollBatchDto> {
   const doc = await PayrollBatchModel.findById(id);
   if (!doc) throw new AppError(404, "Payroll batch not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_VERIFICATION" && doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
     throw new AppError(422, "This Payroll batch is not pending any approval.");
   }

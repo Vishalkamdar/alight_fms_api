@@ -20,7 +20,11 @@ export const updateFinancialYearStatusSchema = z.object({
   status: z.enum(FINANCIAL_YEAR_STATUSES),
 });
 
-export const enablePreviousYearEntrySchema = z.object({
+export const setEntryEnabledSchema = z.object({
+  enabled: z.boolean().optional().default(true),
+});
+
+export const setViewOnlySchema = z.object({
   enabled: z.boolean().optional().default(true),
 });
 
@@ -47,7 +51,8 @@ export const financialYearListQuerySchema = z.object({
 
 export type CreateFinancialYearInput = z.infer<typeof createFinancialYearSchema>;
 export type UpdateFinancialYearInput = z.infer<typeof updateFinancialYearSchema>;
-export type EnablePreviousYearEntryInput = z.infer<typeof enablePreviousYearEntrySchema>;
+export type SetEntryEnabledInput = z.infer<typeof setEntryEnabledSchema>;
+export type SetViewOnlyInput = z.infer<typeof setViewOnlySchema>;
 export type CloseBooksInput = z.infer<typeof closeBooksSchema>;
 export type ReopenFinancialYearInput = z.infer<typeof reopenFinancialYearSchema>;
 export type FinancialYearListQuery = z.infer<typeof financialYearListQuerySchema>;

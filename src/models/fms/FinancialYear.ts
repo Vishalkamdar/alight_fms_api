@@ -17,9 +17,14 @@ export interface FinancialYearDocument extends Document {
   status: FinancialYearStatus;
   isCurrent: boolean;
   isClosed: boolean;
-  previousYearEntryAllowed: boolean;
-  previousYearEntryEnabledAt: Date | null;
-  previousYearEntryEnabledBy: Types.ObjectId | null;
+  /** Whether new/modified financial entries may be created against this year — mutually exclusive with `viewOnly`, both forced off on close. */
+  entryEnabled: boolean;
+  entryEnabledAt: Date | null;
+  entryEnabledBy: Types.ObjectId | null;
+  /** Historical reporting/viewing only — no new entries, no edits, no approve/reject. Mutually exclusive with `entryEnabled`. */
+  viewOnly: boolean;
+  viewOnlyEnabledAt: Date | null;
+  viewOnlyEnabledBy: Types.ObjectId | null;
   closedAt: Date | null;
   closedBy: Types.ObjectId | null;
   reopenedAt: Date | null;
@@ -45,9 +50,12 @@ const financialYearSchema = new Schema<FinancialYearDocument>(
     status: { type: String, enum: FINANCIAL_YEAR_STATUSES, default: "OPEN" },
     isCurrent: { type: Boolean, default: false },
     isClosed: { type: Boolean, default: false },
-    previousYearEntryAllowed: { type: Boolean, default: false },
-    previousYearEntryEnabledAt: { type: Date, default: null },
-    previousYearEntryEnabledBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
+    entryEnabled: { type: Boolean, default: false },
+    entryEnabledAt: { type: Date, default: null },
+    entryEnabledBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
+    viewOnly: { type: Boolean, default: false },
+    viewOnlyEnabledAt: { type: Date, default: null },
+    viewOnlyEnabledBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
     closedAt: { type: Date, default: null },
     closedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
     reopenedAt: { type: Date, default: null },

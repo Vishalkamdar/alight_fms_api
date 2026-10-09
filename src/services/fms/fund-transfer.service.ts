@@ -627,6 +627,7 @@ export async function verifyFundTransfer(
 ): Promise<FundTransferDto> {
   const doc = await FundTransferModel.findById(id);
   if (!doc) throw new AppError(404, "Fund Transfer not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_VERIFICATION") {
     throw new AppError(422, "This Fund Transfer is not pending verification.");
   }
@@ -695,6 +696,7 @@ export async function approveFundTransfer(
 ): Promise<FundTransferDto> {
   const doc = await FundTransferModel.findById(id);
   if (!doc) throw new AppError(404, "Fund Transfer not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
     throw new AppError(422, "This Fund Transfer is not pending Checker approval.");
   }
@@ -758,6 +760,7 @@ export async function rejectFundTransfer(
 ): Promise<FundTransferDto> {
   const doc = await FundTransferModel.findById(id);
   if (!doc) throw new AppError(404, "Fund Transfer not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_VERIFICATION" && doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
     throw new AppError(422, "This Fund Transfer is not pending any approval.");
   }

@@ -15,14 +15,19 @@ import {
   revokeRefreshToken,
 } from "../utils/refreshToken";
 import {
+  sendEmailChangeVerificationEmail,
   sendPasswordChangedEmail,
   sendPasswordResetConfirmationEmail,
   sendPasswordResetEmail,
   sendWelcomeEmail,
 } from "./email.service";
-import type { LoginInput, SignupInput } from "../schemas/auth.schema";
+import { getOrCreateConfiguration } from "./fms/configuration.service";
+import { profilePhotoPath } from "../utils/fms/upload";
+import fs from "fs";
+import type { LoginInput, SignupInput, UpdateProfileInput } from "../schemas/auth.schema";
 
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+const EMAIL_CHANGE_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 export interface RequestContext {
   userAgent?: string | null;
@@ -40,6 +45,8 @@ export function toSafeUser(user: UserDocument) {
     isActive: user.isActive,
     isEmailVerified: user.isEmailVerified,
     lastLoginAt: user.lastLoginAt,
+    profilePhotoUrl: user.profilePhotoUrl,
+    pendingEmail: user.pendingEmail,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };
@@ -373,6 +380,22 @@ export async function changePassword(
     });
   }
 
+  const isSameAsCurrent = await comparePassword(newPassword, fullUser.password);
+  if (isSameAsCurrent) {
+    await logActivity({
+      user: fullUser._id,
+      action: "PASSWORD_CHANGED",
+      module: "AUTH",
+      description: "Password change failed — new password matches current password.",
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
+    throw new AppError(400, "New password must be different from your current password.", {
+      newPassword: ["New password must be different from current password."],
+    });
+  }
+
   fullUser.password = await hashPassword(newPassword);
   fullUser.tokenVersion += 1;
   await fullUser.save();
@@ -477,4 +500,216 @@ export async function resetPassword(
   void sendPasswordResetConfirmationEmail(user.email, user.fullname).catch((error: unknown) =>
     console.error("[email] failed to send password reset confirmation email:", error)
   );
+}
+
+/**
+ * Updates the caller's own name/email/phone. `fullname` applies directly.
+ * `email` never touches `user.email` until the new address is confirmed —
+ * it's staged on `pendingEmail`/`pendingEmailToken` and a verification link
+ * is emailed to the NEW address (see `verifyEmailChange`). `phone` is
+ * rejected outright while SMS OTP is the active login method app-wide,
+ * since that's the one case where a user's own phone number IS their login
+ * credential and must never change out from under them via this endpoint.
+ */
+export async function updateProfile(
+  user: UserDocument,
+  input: UpdateProfileInput,
+  context: RequestContext
+): Promise<ReturnType<typeof toSafeUser>> {
+  const fullUser = await UserModel.findById(user._id);
+  if (!fullUser) {
+    throw new AppError(401, "Authentication required.");
+  }
+
+  if (input.fullname !== undefined && input.fullname !== fullUser.fullname) {
+    fullUser.fullname = input.fullname;
+    await fullUser.save();
+    await logActivity({
+      user: fullUser._id,
+      action: "PROFILE_UPDATED",
+      module: "USER",
+      description: "Full name updated.",
+      status: "SUCCESS",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
+  }
+
+  if (input.email !== undefined) {
+    const normalizedEmail = input.email.toLowerCase().trim();
+    if (normalizedEmail !== fullUser.email) {
+      const emailTaken = await UserModel.exists({ email: normalizedEmail, _id: { $ne: fullUser._id } });
+      if (emailTaken) {
+        throw new AppError(409, "A user with this email already exists.", {
+          email: ["Email already in use."],
+        });
+      }
+
+      const rawToken = generateOpaqueToken(32);
+      fullUser.pendingEmail = normalizedEmail;
+      fullUser.pendingEmailToken = sha256Hex(rawToken);
+      fullUser.pendingEmailExpires = new Date(Date.now() + EMAIL_CHANGE_TOKEN_TTL_MS);
+      await fullUser.save();
+
+      const confirmUrl = `${env.CLIENT_URL}/verify-email-change?token=${rawToken}`;
+
+      await logActivity({
+        user: fullUser._id,
+        action: "EMAIL_CHANGE_REQUESTED",
+        module: "USER",
+        description: `Email change requested to ${normalizedEmail} — pending verification.`,
+        status: "SUCCESS",
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+      });
+
+      void sendEmailChangeVerificationEmail(normalizedEmail, fullUser.fullname, confirmUrl).catch((error: unknown) =>
+        console.error("[email] failed to send email-change verification email:", error)
+      );
+    }
+  }
+
+  if (input.phone !== undefined && input.phone !== fullUser.phone) {
+    const configuration = await getOrCreateConfiguration();
+    if (configuration.loginAuthenticationMethod === "SMS_OTP") {
+      throw new AppError(422, "Mobile number is locked while OTP login is enabled.", {
+        phone: ["Mobile number cannot be changed while SMS OTP login is active."],
+      });
+    }
+
+    const phoneTaken = await UserModel.exists({ phone: input.phone, _id: { $ne: fullUser._id } });
+    if (phoneTaken) {
+      throw new AppError(409, "A user with this phone number already exists.", {
+        phone: ["Phone number already in use."],
+      });
+    }
+
+    fullUser.phone = input.phone;
+    await fullUser.save();
+    await logActivity({
+      user: fullUser._id,
+      action: "PROFILE_UPDATED",
+      module: "USER",
+      description: "Mobile number updated.",
+      status: "SUCCESS",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
+  }
+
+  return toSafeUser(fullUser);
+}
+
+/** Confirms a pending email change via the single-use token mailed to the NEW address. */
+export async function verifyEmailChange(
+  rawToken: string,
+  context: RequestContext
+): Promise<ReturnType<typeof toSafeUser>> {
+  const tokenHash = sha256Hex(rawToken);
+
+  const user = await UserModel.findOne({ pendingEmailToken: tokenHash }).select(
+    "+pendingEmailToken +pendingEmailExpires"
+  );
+
+  if (!user || !user.pendingEmailExpires || user.pendingEmailExpires.getTime() <= Date.now() || !user.pendingEmail) {
+    await logActivity({
+      action: "EMAIL_CHANGED",
+      module: "USER",
+      description: "Email verification failed — invalid or expired verification link.",
+      status: "FAILURE",
+      ipAddress: context.ipAddress,
+      userAgent: context.userAgent,
+    });
+    throw new AppError(400, "This email verification link is invalid or has expired.");
+  }
+
+  user.email = user.pendingEmail;
+  user.pendingEmail = null;
+  user.pendingEmailToken = null;
+  user.pendingEmailExpires = null;
+  await user.save();
+
+  await logActivity({
+    user: user._id,
+    action: "EMAIL_CHANGED",
+    module: "USER",
+    description: `Email changed to ${user.email}.`,
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
+  return toSafeUser(user);
+}
+
+/** Replaces the caller's profile photo, best-effort deleting the previous file — mirrors replaceLogo's pattern. */
+export async function uploadProfilePhoto(
+  user: UserDocument,
+  storedFileName: string,
+  context: RequestContext
+): Promise<ReturnType<typeof toSafeUser>> {
+  const fullUser = await UserModel.findById(user._id);
+  if (!fullUser) {
+    throw new AppError(401, "Authentication required.");
+  }
+
+  const previousUrl = fullUser.profilePhotoUrl;
+  fullUser.profilePhotoUrl = `/uploads/profile-photos/${storedFileName}`;
+  await fullUser.save();
+
+  if (previousUrl) {
+    const previousFileName = previousUrl.split("/").pop();
+    if (previousFileName) {
+      fs.unlink(profilePhotoPath(previousFileName), () => {
+        // Best-effort — the DB record is already updated and is the source of truth.
+      });
+    }
+  }
+
+  await logActivity({
+    user: fullUser._id,
+    action: "PROFILE_PHOTO_CHANGED",
+    module: "USER",
+    description: "Profile photo updated.",
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
+  return toSafeUser(fullUser);
+}
+
+export async function removeProfilePhoto(
+  user: UserDocument,
+  context: RequestContext
+): Promise<ReturnType<typeof toSafeUser>> {
+  const fullUser = await UserModel.findById(user._id);
+  if (!fullUser) {
+    throw new AppError(401, "Authentication required.");
+  }
+
+  const previousUrl = fullUser.profilePhotoUrl;
+  fullUser.profilePhotoUrl = null;
+  await fullUser.save();
+
+  if (previousUrl) {
+    const previousFileName = previousUrl.split("/").pop();
+    if (previousFileName) {
+      fs.unlink(profilePhotoPath(previousFileName), () => {
+        // Best-effort — the DB record is already updated and is the source of truth.
+      });
+    }
+  }
+
+  await logActivity({
+    user: fullUser._id,
+    action: "PROFILE_PHOTO_REMOVED",
+    module: "USER",
+    description: "Profile photo removed.",
+    status: "SUCCESS",
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
+  return toSafeUser(fullUser);
 }

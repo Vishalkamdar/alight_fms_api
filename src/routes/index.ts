@@ -20,6 +20,7 @@ import expenditureRoutes from "./fms/expenditure.routes";
 import payrollRoutes from "./fms/payroll.routes";
 import approvalsRoutes from "./fms/approvals.routes";
 import dashboardRoutes from "./fms/dashboard.routes";
+import reportsRoutes from "./fms/reports.routes";
 import activityLogRoutes from "./activity-log.routes";
 
 const router = Router();
@@ -45,6 +46,7 @@ router.use("/fms/expenditures", expenditureRoutes);
 router.use("/fms/payroll-batches", payrollRoutes);
 router.use("/fms/approvals", approvalsRoutes);
 router.use("/fms/dashboard", dashboardRoutes);
+router.use("/fms/reports", reportsRoutes);
 // Exposes /fms/user-node-roles, /fms/users/:userId/nodes, /fms/nodes/:nodeId/users,
 // /fms/my-nodes, and /fms/my-nodes/:nodeId/role.
 router.use("/fms", userNodeRoleRoutes);

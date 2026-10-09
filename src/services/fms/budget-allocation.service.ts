@@ -1406,6 +1406,7 @@ export async function verifyBudgetAllocation(
 ): Promise<BudgetAllocationDto> {
   const doc = await BudgetAllocationModel.findById(id);
   if (!doc) throw new AppError(404, "Budget Allocation not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_VERIFICATION") {
     throw new AppError(422, "This Budget Allocation is not pending verification.");
   }
@@ -1475,6 +1476,7 @@ export async function approveBudgetAllocation(
 ): Promise<BudgetAllocationDto> {
   const doc = await BudgetAllocationModel.findById(id);
   if (!doc) throw new AppError(404, "Budget Allocation not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
     throw new AppError(422, "This Budget Allocation is not pending Checker approval.");
   }
@@ -1546,6 +1548,7 @@ export async function rejectBudgetAllocation(
 ): Promise<BudgetAllocationDto> {
   const doc = await BudgetAllocationModel.findById(id);
   if (!doc) throw new AppError(404, "Budget Allocation not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_VERIFICATION" && doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
     throw new AppError(422, "This Budget Allocation is not pending any approval.");
   }

@@ -668,6 +668,7 @@ export async function createExpenditure(input: CreateExpenditureInput, context: 
 export async function verifyExpenditure(id: string, input: { remarks?: string }, context: ActorContext): Promise<ExpenditureDto> {
   const doc = await ExpenditureModel.findById(id);
   if (!doc) throw new AppError(404, "Expenditure not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_VERIFICATION") throw new AppError(422, "This Expenditure is not pending verification.");
 
   const actorId = requireActorId(context);
@@ -732,6 +733,7 @@ export async function verifyExpenditure(id: string, input: { remarks?: string },
 export async function approveExpenditure(id: string, input: { remarks?: string }, context: ActorContext): Promise<ExpenditureDto> {
   const doc = await ExpenditureModel.findById(id);
   if (!doc) throw new AppError(404, "Expenditure not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") throw new AppError(422, "This Expenditure is not pending Checker approval.");
 
   const actorId = requireActorId(context);
@@ -785,6 +787,7 @@ export async function approveExpenditure(id: string, input: { remarks?: string }
 export async function rejectExpenditure(id: string, input: { reason: string }, context: ActorContext): Promise<ExpenditureDto> {
   const doc = await ExpenditureModel.findById(id);
   if (!doc) throw new AppError(404, "Expenditure not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_VERIFICATION" && doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
     throw new AppError(422, "This Expenditure is not pending any approval.");
   }

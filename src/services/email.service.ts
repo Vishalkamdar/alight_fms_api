@@ -80,3 +80,15 @@ export async function sendPasswordChangedEmail(to: string, fullname: string): Pr
     html: `<p>Hi ${fullname},</p><p>Your password was just changed. If this wasn't you, contact support immediately.</p>`,
   });
 }
+
+export async function sendEmailChangeVerificationEmail(
+  to: string,
+  fullname: string,
+  confirmUrl: string
+): Promise<void> {
+  await sendEmail({
+    to,
+    subject: "Confirm your new email address",
+    html: `<p>Hi ${fullname},</p><p>Confirm this email address to finish updating your Alight FMS login email. This link expires in 1 hour.</p><p><a href="${confirmUrl}">${confirmUrl}</a></p><p>If you did not request this change, you can safely ignore this email — your current email stays active either way.</p>`,
+  });
+}

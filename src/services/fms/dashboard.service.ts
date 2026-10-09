@@ -1,94 +1,32 @@
 import mongoose, { Types } from "mongoose";
-import { AppError } from "../../utils/AppError";
 import { ExpenditureModel } from "../../models/fms/Expenditure";
 import { PayrollBatchModel } from "../../models/fms/PayrollBatch";
 import { BudgetAllocationModel } from "../../models/fms/BudgetAllocation";
 import { BudgetSetupModel } from "../../models/fms/BudgetSetup";
 import { FundTransferModel } from "../../models/fms/FundTransfer";
 import { OrganizationNodeModel } from "../../models/OrganizationNode";
-import { UserModel, type UserRole } from "../../models/User";
-import { FinancialYearModel, type FinancialYearDocument } from "../../models/fms/FinancialYear";
-import { getCurrentFinancialYear } from "./financial-year.service";
-import { getAllowedNodeIdsForList, getMyActionableNodeIds, type ActorForPermission } from "./financial-workflow.service";
+import { UserModel } from "../../models/User";
+import type { FinancialYearDocument } from "../../models/fms/FinancialYear";
+import { getMyActionableNodeIds } from "./financial-workflow.service";
 import { operationalRoleForSystemRole } from "../../utils/fms/node-permission";
+import {
+  PENDING_STATUSES,
+  REJECTED_STATUSES,
+  FISCAL_MONTHS_FULL,
+  toObjectIds,
+  nodeFilter,
+  sumField,
+  countAndSum,
+  resolveRootNodeIds,
+  resolveEffectiveNodeIds,
+  resolveFinancialYear,
+  buildFiscalTrendFromMonthKeys,
+  resolveNames,
+  type ReportActorContext,
+} from "./report-aggregation.service";
 import type { DashboardQuery } from "../../schemas/fms/dashboard.schema";
 
-interface ActorContext extends ActorForPermission {
-  actorRole: UserRole;
-}
-
-const PENDING_STATUSES = ["PENDING_VERIFICATION", "PENDING_CHECKER_APPROVAL"] as const;
-const REJECTED_STATUSES = ["REJECTED_BY_VERIFIER", "REJECTED_BY_CHECKER"] as const;
-const FISCAL_MONTHS_FULL = [
-  "April", "May", "June", "July", "August", "September", "October", "November", "December", "January", "February", "March",
-] as const;
-
-function toObjectIds(ids: string[]): Types.ObjectId[] {
-  return ids.map((id) => new Types.ObjectId(id));
-}
-
-/** `null` = unrestricted (every node). A `string[]` always filters on `field`. */
-function nodeFilter(nodeIds: string[] | null, field = "organizationNodeId"): Record<string, unknown> {
-  if (nodeIds === null) return {};
-  return { [field]: { $in: toObjectIds(nodeIds) } };
-}
-
-async function sumField(Model: mongoose.Model<any>, field: string, match: Record<string, unknown>): Promise<number> {
-  const rows = await Model.aggregate<{ _id: null; sum: number }>([{ $match: match }, { $group: { _id: null, sum: { $sum: `$${field}` } } }]);
-  return rows[0]?.sum ?? 0;
-}
-
-async function countAndSum(Model: mongoose.Model<any>, match: Record<string, unknown>, amountField: string): Promise<{ count: number; amount: number }> {
-  const rows = await Model.aggregate<{ _id: null; count: number; amount: number }>([
-    { $match: match },
-    { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: `$${amountField}` } } },
-  ]);
-  return { count: rows[0]?.count ?? 0, amount: rows[0]?.amount ?? 0 };
-}
-
-/** Every Organization Node a node id could resolve up to — in-memory walk, one query, no N+1 (same shape as Bulk Upload's resolveOrganizationRoot). */
-async function resolveRootNodeIds(nodeIds: string[]): Promise<string[]> {
-  const allNodes = await OrganizationNodeModel.find().select("_id parentNodeId").lean();
-  const parentById = new Map(allNodes.map((n) => [String(n._id), n.parentNodeId ? String(n.parentNodeId) : null]));
-  const roots = new Set<string>();
-  for (const id of nodeIds) {
-    let current = id;
-    const visited = new Set<string>();
-    while (parentById.get(current)) {
-      if (visited.has(current)) break;
-      visited.add(current);
-      current = parentById.get(current)!;
-    }
-    roots.add(current);
-  }
-  return [...roots];
-}
-
-async function resolveEffectiveNodeIds(actor: ActorContext, requestedNodeId: string | undefined): Promise<string[] | null> {
-  const allowed = await getAllowedNodeIdsForList(actor);
-  if (!requestedNodeId) return allowed;
-  if (allowed !== null && !allowed.includes(requestedNodeId)) {
-    throw new AppError(403, "You do not have access to this Organization Node.");
-  }
-  return [requestedNodeId];
-}
-
-async function resolveFinancialYear(financialYearId: string | undefined): Promise<FinancialYearDocument> {
-  if (!financialYearId) return getCurrentFinancialYear();
-  const year = await FinancialYearModel.findById(financialYearId);
-  if (!year) throw new AppError(404, "Financial Year not found.");
-  return year;
-}
-
-function buildFiscalTrendFromMonthKeys(fyStartDate: Date, amountByMonthKey: Map<string, number>): Array<{ month: string; amount: number }> {
-  const points: Array<{ month: string; amount: number }> = [];
-  for (let i = 0; i < 12; i += 1) {
-    const d = new Date(Date.UTC(fyStartDate.getUTCFullYear(), fyStartDate.getUTCMonth() + i, 1));
-    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-    points.push({ month: d.toLocaleString("en-US", { month: "short", timeZone: "UTC" }), amount: amountByMonthKey.get(key) ?? 0 });
-  }
-  return points;
-}
+type ActorContext = ReportActorContext;
 
 // ---------------------------------------------------------------------------
 // §2 — Top budget KPIs
@@ -103,7 +41,7 @@ export interface BudgetKpis {
   totalPayroll: number;
 }
 
-async function getBudgetKpis(fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null): Promise<BudgetKpis> {
+export async function getBudgetKpis(fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null): Promise<BudgetKpis> {
   const rootNodeIds = effectiveNodeIds === null ? null : await resolveRootNodeIds(effectiveNodeIds);
 
   const totalBudget = await sumField(BudgetSetupModel, "originalAmount", {
@@ -292,10 +230,16 @@ export interface NodeSummaryRow {
   expenditure: number;
 }
 
-async function getNodeSummaries(fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null): Promise<NodeSummaryRow[] | null> {
-  if (effectiveNodeIds !== null && effectiveNodeIds.length <= 1) return null;
-
-  const nodeMatch = nodeFilter(effectiveNodeIds);
+/**
+ * The per-node Budget/Expenditure/On-Hold breakdown shared by the
+ * Dashboard's node-summary widget AND the Reports module's Budget Summary /
+ * Organization Node Financial reports — one implementation, two callers.
+ * `nodeIds === null` returns every Active node; otherwise exactly the
+ * requested set (regardless of count — callers decide whether "only show
+ * for >1 node" applies to them).
+ */
+export async function computeNodeFinancialSummaries(fyObjectId: Types.ObjectId, nodeIds: string[] | null): Promise<NodeSummaryRow[]> {
+  const nodeMatch = nodeFilter(nodeIds);
   const [allocationRows, expenditureRows, onHoldExpRows, onHoldAllocRows, nodes] = await Promise.all([
     BudgetAllocationModel.aggregate<{ _id: Types.ObjectId; amount: number; subAllocated: number }>([
       { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch } },
@@ -313,7 +257,7 @@ async function getNodeSummaries(fyObjectId: Types.ObjectId, effectiveNodeIds: st
       { $match: { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch } },
       { $group: { _id: "$organizationNodeId", amount: { $sum: "$holdingAmount" } } },
     ]),
-    OrganizationNodeModel.find(effectiveNodeIds === null ? { status: "Active" } : { _id: { $in: toObjectIds(effectiveNodeIds) } })
+    OrganizationNodeModel.find(nodeIds === null ? { status: "Active" } : { _id: { $in: toObjectIds(nodeIds) } })
       .select("_id name")
       .lean(),
   ]);
@@ -344,6 +288,11 @@ async function getNodeSummaries(fyObjectId: Types.ObjectId, effectiveNodeIds: st
   });
 }
 
+async function getNodeSummaries(fyObjectId: Types.ObjectId, effectiveNodeIds: string[] | null): Promise<NodeSummaryRow[] | null> {
+  if (effectiveNodeIds !== null && effectiveNodeIds.length <= 1) return null;
+  return computeNodeFinancialSummaries(fyObjectId, effectiveNodeIds);
+}
+
 // ---------------------------------------------------------------------------
 // §7/§8 — Expenditure / Payroll Overview
 // ---------------------------------------------------------------------------
@@ -367,7 +316,7 @@ export interface PayrollOverview {
   trend: OverviewTrendPoint[];
 }
 
-async function getExpenditureOverview(fy: FinancialYearDocument, effectiveNodeIds: string[] | null): Promise<ExpenditureOverview> {
+export async function getExpenditureOverview(fy: FinancialYearDocument, effectiveNodeIds: string[] | null): Promise<ExpenditureOverview> {
   const fyObjectId = fy._id;
   const nodeMatch = nodeFilter(effectiveNodeIds);
   const now = new Date();
@@ -388,7 +337,7 @@ async function getExpenditureOverview(fy: FinancialYearDocument, effectiveNodeId
   return { thisMonth, approved, pending, paid, trend: buildFiscalTrendFromMonthKeys(fy.startDate, trendByMonthKey) };
 }
 
-async function getPayrollOverview(fy: FinancialYearDocument, effectiveNodeIds: string[] | null): Promise<PayrollOverview> {
+export async function getPayrollOverview(fy: FinancialYearDocument, effectiveNodeIds: string[] | null): Promise<PayrollOverview> {
   const fyObjectId = fy._id;
   const nodeMatch = nodeFilter(effectiveNodeIds);
   const currentMonthName = new Date().toLocaleString("en-US", { month: "long" });
@@ -428,15 +377,6 @@ export interface RecentTransaction {
   amount: number;
   status: string;
   createdBy: string;
-}
-
-async function resolveNames(Model: mongoose.Model<any>, ids: Array<Types.ObjectId | null | undefined>, nameField: string): Promise<Map<string, string>> {
-  const uniq = [...new Set(ids.filter((id): id is Types.ObjectId => Boolean(id)).map(String))];
-  if (uniq.length === 0) return new Map();
-  const docs = await Model.find({ _id: { $in: uniq } })
-    .select(nameField)
-    .lean();
-  return new Map(docs.map((d) => [String((d as { _id: Types.ObjectId })._id), (d as Record<string, string>)[nameField]]));
 }
 
 interface RecentTransactionFilters {

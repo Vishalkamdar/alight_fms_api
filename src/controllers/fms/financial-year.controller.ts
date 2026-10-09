@@ -5,7 +5,8 @@ import * as financialYearService from "../../services/fms/financial-year.service
 import type { AuthenticatedRequest } from "../../middleware/auth";
 import type {
   CreateFinancialYearInput,
-  EnablePreviousYearEntryInput,
+  SetEntryEnabledInput,
+  SetViewOnlyInput,
   FinancialYearListQuery,
   ReopenFinancialYearInput,
   UpdateFinancialYearInput,
@@ -52,13 +53,23 @@ export async function updateFinancialYearStatus(req: AuthenticatedRequest, res: 
   sendSuccess(res, year, { message: "Financial Year status updated." });
 }
 
-export async function enablePreviousYearEntry(req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function setEntryEnabled(req: AuthenticatedRequest, res: Response): Promise<void> {
   const { id } = res.locals.params as { id: string };
-  const { enabled } = res.locals.body as EnablePreviousYearEntryInput;
+  const { enabled } = res.locals.body as SetEntryEnabledInput;
   const context = getActorContext(req);
-  const year = await financialYearService.setPreviousYearEntryAllowed(id, enabled, context);
+  const year = await financialYearService.setEntryEnabled(id, enabled, context);
   sendSuccess(res, year, {
-    message: `Previous-year entry ${enabled ? "enabled" : "disabled"} for "${year.financialYear}".`,
+    message: `Entry ${enabled ? "enabled" : "disabled"} for "${year.financialYear}".`,
+  });
+}
+
+export async function setViewOnly(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { id } = res.locals.params as { id: string };
+  const { enabled } = res.locals.body as SetViewOnlyInput;
+  const context = getActorContext(req);
+  const year = await financialYearService.setViewOnly(id, enabled, context);
+  sendSuccess(res, year, {
+    message: `View Only ${enabled ? "enabled" : "disabled"} for "${year.financialYear}".`,
   });
 }
 

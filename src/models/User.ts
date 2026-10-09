@@ -41,6 +41,11 @@ export interface UserDocument extends Document {
   passwordResetToken: string | null;
   passwordResetExpires: Date | null;
   lastLoginAt: Date | null;
+  profilePhotoUrl: string | null;
+  /** The not-yet-verified new email address a profile update is waiting to confirm — `user.email` itself is never touched until verified. */
+  pendingEmail: string | null;
+  pendingEmailToken: string | null;
+  pendingEmailExpires: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -67,6 +72,10 @@ const userSchema = new Schema<UserDocument>(
     passwordResetToken: { type: String, default: null, select: false },
     passwordResetExpires: { type: Date, default: null, select: false },
     lastLoginAt: { type: Date, default: null },
+    profilePhotoUrl: { type: String, default: null },
+    pendingEmail: { type: String, default: null },
+    pendingEmailToken: { type: String, default: null, select: false },
+    pendingEmailExpires: { type: Date, default: null, select: false },
   },
   { timestamps: true }
 );

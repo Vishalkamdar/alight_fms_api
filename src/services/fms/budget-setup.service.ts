@@ -708,6 +708,7 @@ export async function verifyBudgetSetup(
   context: ActorContext
 ): Promise<BudgetSetupDto> {
   const doc = await findByIdOr404(id);
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_VERIFICATION") {
     throw new AppError(422, "This Budget Setup is not pending verification.");
   }
@@ -778,6 +779,7 @@ export async function approveBudgetSetup(
   context: ActorContext
 ): Promise<BudgetSetupDto> {
   const doc = await findByIdOr404(id);
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
     throw new AppError(422, "This Budget Setup is not pending Checker approval.");
   }
@@ -841,6 +843,7 @@ export async function rejectBudgetSetup(
   context: ActorContext
 ): Promise<BudgetSetupDto> {
   const doc = await findByIdOr404(id);
+  await assertFinancialYearIsWritable(doc.financialYearId);
   if (doc.approvalStatus !== "PENDING_VERIFICATION" && doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
     throw new AppError(422, "This Budget Setup is not pending any approval.");
   }

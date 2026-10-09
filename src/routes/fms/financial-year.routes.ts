@@ -6,7 +6,8 @@ import { objectIdParamsSchema } from "../../schemas/common.schema";
 import {
   closeBooksSchema,
   createFinancialYearSchema,
-  enablePreviousYearEntrySchema,
+  setEntryEnabledSchema,
+  setViewOnlySchema,
   financialYearListQuerySchema,
   reopenFinancialYearSchema,
   updateFinancialYearSchema,
@@ -56,11 +57,18 @@ router.patch(
   controller.updateFinancialYearStatus
 );
 router.post(
-  "/:id/enable-previous-year-entry",
+  "/:id/entry-enabled",
   canWrite,
   validate(objectIdParamsSchema, "params"),
-  validate(enablePreviousYearEntrySchema, "body"),
-  controller.enablePreviousYearEntry
+  validate(setEntryEnabledSchema, "body"),
+  controller.setEntryEnabled
+);
+router.post(
+  "/:id/view-only",
+  canWrite,
+  validate(objectIdParamsSchema, "params"),
+  validate(setViewOnlySchema, "body"),
+  controller.setViewOnly
 );
 router.post(
   "/:id/close-books",

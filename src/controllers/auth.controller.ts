@@ -1,8 +1,10 @@
 import { Response } from "express";
 import { Types } from "mongoose";
+import fs from "fs";
 import * as authService from "../services/auth.service";
 import { sendSuccess } from "../utils/apiResponse";
 import { AppError } from "../utils/AppError";
+import { isValidImageSignature, uploadProfilePhoto as uploadProfilePhotoMiddleware } from "../utils/fms/upload";
 import type { AuthenticatedRequest } from "../middleware/auth";
 import type {
   ChangePasswordInput,
@@ -12,6 +14,8 @@ import type {
   RequestLoginOtpInput,
   ResetPasswordInput,
   SignupInput,
+  UpdateProfileInput,
+  VerifyEmailChangeInput,
   VerifyLoginOtpInput,
 } from "../schemas/auth.schema";
 
@@ -88,4 +92,52 @@ export async function resetPassword(req: AuthenticatedRequest, res: Response): P
   const { token, password } = res.locals.body as ResetPasswordInput;
   await authService.resetPassword(token, password, requestContext(req));
   sendSuccess(res, null, { message: "Password reset successfully." });
+}
+
+export async function updateProfile(req: AuthenticatedRequest, res: Response): Promise<void> {
+  if (!req.user) throw new AppError(401, "Authentication required.");
+  const body = res.locals.body as UpdateProfileInput;
+  const user = await authService.updateProfile(req.user, body, requestContext(req));
+  sendSuccess(res, user, { message: "Profile updated." });
+}
+
+export async function uploadProfilePhoto(req: AuthenticatedRequest, res: Response): Promise<void> {
+  if (!req.user) throw new AppError(401, "Authentication required.");
+
+  await new Promise<void>((resolve, reject) => {
+    uploadProfilePhotoMiddleware(req, res, (err: unknown) => {
+      if (err) {
+        reject(new AppError(400, err instanceof Error ? err.message : "Failed to upload the photo."));
+        return;
+      }
+      resolve();
+    });
+  });
+
+  if (!req.file) {
+    throw new AppError(400, "A photo file is required.");
+  }
+
+  const isGenuineImage = await isValidImageSignature(req.file.path, req.file.mimetype);
+  if (!isGenuineImage) {
+    fs.unlink(req.file.path, () => {
+      // Best-effort cleanup of the rejected file.
+    });
+    throw new AppError(400, "This file is not a valid PNG, JPEG, or WEBP image.");
+  }
+
+  const user = await authService.uploadProfilePhoto(req.user, req.file.filename, requestContext(req));
+  sendSuccess(res, user, { message: "Profile photo updated." });
+}
+
+export async function removeProfilePhoto(req: AuthenticatedRequest, res: Response): Promise<void> {
+  if (!req.user) throw new AppError(401, "Authentication required.");
+  const user = await authService.removeProfilePhoto(req.user, requestContext(req));
+  sendSuccess(res, user, { message: "Profile photo removed." });
+}
+
+export async function verifyEmailChange(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { token } = res.locals.body as VerifyEmailChangeInput;
+  const user = await authService.verifyEmailChange(token, requestContext(req));
+  sendSuccess(res, user, { message: "Email updated." });
 }

@@ -1,4 +1,4 @@
-import { Types } from "mongoose";
+import mongoose, { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
 import { logActivity } from "../../utils/activity-log";
 import {
@@ -7,11 +7,28 @@ import {
   type FinancialYearStatus,
 } from "../../models/fms/FinancialYear";
 import { OrganizationNodeModel } from "../../models/OrganizationNode";
+import { SchemeHeadNodeModel } from "../../models/SchemeHeadNode";
+import { ExpenditureModel } from "../../models/fms/Expenditure";
+import { PayrollBatchModel } from "../../models/fms/PayrollBatch";
+import { BudgetAllocationModel } from "../../models/fms/BudgetAllocation";
+import { BudgetSetupModel } from "../../models/fms/BudgetSetup";
+import { FundTransferModel } from "../../models/fms/FundTransfer";
 import type {
   CreateFinancialYearInput,
   FinancialYearListQuery,
   UpdateFinancialYearInput,
 } from "../../schemas/fms/financial-year.schema";
+
+// Small, self-contained aggregation helpers — deliberately NOT imported from
+// report-aggregation.service.ts, which itself imports getCurrentFinancialYear
+// from this file; importing back from there would create a circular module
+// dependency. These two are a handful of lines each, cheap to keep local.
+const PENDING_STATUSES = ["PENDING_VERIFICATION", "PENDING_CHECKER_APPROVAL"] as const;
+
+async function sumField(Model: mongoose.Model<any>, field: string, match: Record<string, unknown>): Promise<number> {
+  const rows = await Model.aggregate<{ _id: null; sum: number }>([{ $match: match }, { $group: { _id: null, sum: { $sum: `$${field}` } } }]);
+  return rows[0]?.sum ?? 0;
+}
 
 interface ActorContext {
   actorId: Types.ObjectId | null;
@@ -27,9 +44,14 @@ export interface FinancialYearDto {
   status: FinancialYearStatus;
   isCurrent: boolean;
   isClosed: boolean;
-  previousYearEntryAllowed: boolean;
-  previousYearEntryEnabledAt: Date | null;
-  previousYearEntryEnabledBy: string | null;
+  entryEnabled: boolean;
+  entryEnabledAt: Date | null;
+  entryEnabledBy: string | null;
+  viewOnly: boolean;
+  viewOnlyEnabledAt: Date | null;
+  viewOnlyEnabledBy: string | null;
+  /** "ACTIVE_ENTRY" | "VIEW_ONLY" | "CLOSED" | "RESTRICTED" — derived so every surface shows the same label without re-deriving it. */
+  accessState: "ACTIVE_ENTRY" | "VIEW_ONLY" | "CLOSED" | "RESTRICTED";
   closedAt: Date | null;
   closedBy: string | null;
   reopenedAt: Date | null;
@@ -41,6 +63,14 @@ export interface FinancialYearDto {
   updatedAt: Date;
 }
 
+/** Active Entry / View Only / Closed — the one derived label every surface shows instead of reasoning about three raw flags itself. */
+function deriveAccessState(doc: Pick<FinancialYearDocument, "isClosed" | "viewOnly" | "entryEnabled">): "ACTIVE_ENTRY" | "VIEW_ONLY" | "CLOSED" | "RESTRICTED" {
+  if (doc.isClosed) return "CLOSED";
+  if (doc.viewOnly) return "VIEW_ONLY";
+  if (doc.entryEnabled) return "ACTIVE_ENTRY";
+  return "RESTRICTED";
+}
+
 function serialize(doc: FinancialYearDocument): FinancialYearDto {
   return {
     _id: String(doc._id),
@@ -50,11 +80,13 @@ function serialize(doc: FinancialYearDocument): FinancialYearDto {
     status: doc.status,
     isCurrent: doc.isCurrent,
     isClosed: doc.isClosed,
-    previousYearEntryAllowed: doc.previousYearEntryAllowed,
-    previousYearEntryEnabledAt: doc.previousYearEntryEnabledAt,
-    previousYearEntryEnabledBy: doc.previousYearEntryEnabledBy
-      ? String(doc.previousYearEntryEnabledBy)
-      : null,
+    entryEnabled: doc.entryEnabled,
+    entryEnabledAt: doc.entryEnabledAt,
+    entryEnabledBy: doc.entryEnabledBy ? String(doc.entryEnabledBy) : null,
+    viewOnly: doc.viewOnly,
+    viewOnlyEnabledAt: doc.viewOnlyEnabledAt,
+    viewOnlyEnabledBy: doc.viewOnlyEnabledBy ? String(doc.viewOnlyEnabledBy) : null,
+    accessState: deriveAccessState(doc),
     closedAt: doc.closedAt,
     closedBy: doc.closedBy ? String(doc.closedBy) : null,
     reopenedAt: doc.reopenedAt,
@@ -110,14 +142,25 @@ async function findByIdOr404(id: string): Promise<FinancialYearDocument> {
  * already current.
  */
 async function markAsCurrent(target: FinancialYearDocument, context: ActorContext): Promise<void> {
-  if (target.isCurrent) return;
+  const wasAlreadyCurrent = target.isCurrent;
 
-  await FinancialYearModel.updateMany(
-    { _id: { $ne: target._id }, isCurrent: true },
-    { $set: { isCurrent: false } }
-  );
-  target.isCurrent = true;
+  // Self-heals entryEnabled for any year that became current before this
+  // flag existed (or was never explicitly set) — runs even when already
+  // current, so "the current year is immediately writable" keeps holding
+  // true under the new 3-state model without a separate migration step.
+  // Never touches a year someone deliberately locked down (View Only or
+  // Closed).
+  const needsEntryBackfill = !target.viewOnly && !target.isClosed && !target.entryEnabled;
+  if (wasAlreadyCurrent && !needsEntryBackfill) return;
+
+  if (!wasAlreadyCurrent) {
+    await FinancialYearModel.updateMany({ _id: { $ne: target._id }, isCurrent: true }, { $set: { isCurrent: false } });
+    target.isCurrent = true;
+  }
+  if (needsEntryBackfill) target.entryEnabled = true;
   await target.save();
+
+  if (wasAlreadyCurrent) return;
 
   await logActivity({
     user: context.actorId,
@@ -339,33 +382,72 @@ export async function updateFinancialYearStatus(
   return serialize(year);
 }
 
-export async function setPreviousYearEntryAllowed(
-  id: string,
-  enabled: boolean,
-  context: ActorContext
-): Promise<FinancialYearDto> {
+/**
+ * Enable/disable financial entries for this year — mutually exclusive with
+ * `viewOnly` (spec §4: enabling one always turns the other off), and
+ * rejected outright on a closed year (spec §4: "a closed Financial Year
+ * cannot have either option enabled" — reopen it first).
+ */
+export async function setEntryEnabled(id: string, enabled: boolean, context: ActorContext): Promise<FinancialYearDto> {
   const year = await findByIdOr404(id);
   if (year.isClosed) {
-    throw new AppError(422, "Cannot change previous-year entry permission on a closed Financial Year.");
-  }
-  if (year.isCurrent) {
-    throw new AppError(
-      422,
-      "This is the current Financial Year — previous-year entry permission only applies to earlier years."
-    );
+    throw new AppError(422, "Cannot change entry access on a closed Financial Year. Reopen it first.");
   }
 
-  year.previousYearEntryAllowed = enabled;
-  year.previousYearEntryEnabledAt = enabled ? new Date() : null;
-  year.previousYearEntryEnabledBy = enabled ? context.actorId : null;
+  const previousState = deriveAccessState(year);
+  year.entryEnabled = enabled;
+  year.entryEnabledAt = enabled ? new Date() : null;
+  year.entryEnabledBy = enabled ? context.actorId : null;
+  if (enabled && year.viewOnly) {
+    year.viewOnly = false;
+    year.viewOnlyEnabledAt = null;
+    year.viewOnlyEnabledBy = null;
+  }
   year.updatedBy = context.actorId;
   await year.save();
 
   await logActivity({
     user: context.actorId,
-    action: enabled ? "PREVIOUS_YEAR_ENTRY_ENABLED" : "PREVIOUS_YEAR_ENTRY_DISABLED",
+    action: enabled ? "FINANCIAL_YEAR_ENTRY_ENABLED" : "FINANCIAL_YEAR_ENTRY_DISABLED",
     module: "FMS_CONFIG",
-    description: `${enabled ? "Enabled" : "Disabled"} previous-year entry for Financial Year "${year.financialYear}".`,
+    description: `Financial Year "${year.financialYear}" entry access changed from ${previousState} to ${deriveAccessState(year)}.`,
+    entityType: "FinancialYear",
+    entityId: year._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
+  return serialize(year);
+}
+
+/**
+ * Enable/disable View Only (historical reporting, no new/modified entries)
+ * — mutually exclusive with `entryEnabled`, rejected on a closed year, same
+ * rules as `setEntryEnabled` mirrored the other way.
+ */
+export async function setViewOnly(id: string, enabled: boolean, context: ActorContext): Promise<FinancialYearDto> {
+  const year = await findByIdOr404(id);
+  if (year.isClosed) {
+    throw new AppError(422, "Cannot change View Only access on a closed Financial Year. Reopen it first.");
+  }
+
+  const previousState = deriveAccessState(year);
+  year.viewOnly = enabled;
+  year.viewOnlyEnabledAt = enabled ? new Date() : null;
+  year.viewOnlyEnabledBy = enabled ? context.actorId : null;
+  if (enabled && year.entryEnabled) {
+    year.entryEnabled = false;
+    year.entryEnabledAt = null;
+    year.entryEnabledBy = null;
+  }
+  year.updatedBy = context.actorId;
+  await year.save();
+
+  await logActivity({
+    user: context.actorId,
+    action: enabled ? "FINANCIAL_YEAR_VIEW_ONLY_ENABLED" : "FINANCIAL_YEAR_VIEW_ONLY_DISABLED",
+    module: "FMS_CONFIG",
+    description: `Financial Year "${year.financialYear}" entry access changed from ${previousState} to ${deriveAccessState(year)}.`,
     entityType: "FinancialYear",
     entityId: year._id,
     ipAddress: context.ipAddress,
@@ -376,23 +458,19 @@ export async function setPreviousYearEntryAllowed(
 }
 
 // ---------------------------------------------------------------------------
-// Year-end closing framework — pluggable so Budget/Fund/Invoice/Payroll
-// modules contribute their own figures without this module knowing about
-// them. Nothing is registered yet, so every summary is currently all-zero.
+// Year-end closing validation — three concrete checks (spec §6/§7/§8) over
+// the modules that actually exist today. An earlier pluggable
+// register-a-provider abstraction lived here for a future that never
+// arrived (confirmed nothing ever called it); removed in favor of the
+// direct checks below, which is what every caller actually needed.
 // ---------------------------------------------------------------------------
-
-export interface ClosingContribution {
-  allocatedAmount?: number;
-  utilizedAmount?: number;
-  committedAmount?: number;
-  pendingAmount?: number;
-  pendingTransactionCount?: number;
-  blockingReasons?: string[];
-}
 
 export interface DepartmentClosingRow {
   nodeId: string;
   nodeName: string;
+  parentNodeName: string | null;
+  headId: string | null;
+  headName: string | null;
   allocatedAmount: number;
   utilizedAmount: number;
   committedAmount: number;
@@ -401,20 +479,105 @@ export interface DepartmentClosingRow {
   hasPendingItems: boolean;
 }
 
-type ClosingSummaryProvider = (financialYearId: string) => Promise<ClosingContribution>;
-type DepartmentSummaryProvider = (financialYearId: string) => Promise<DepartmentClosingRow[]>;
+// ---------------------------------------------------------------------------
+// The three named year-closing checks (spec §6/§7/§8) — computed directly
+// rather than through the provider framework above, which stays in place
+// unused/harmless since nothing currently needs its generic pluggability.
+// ---------------------------------------------------------------------------
 
-const closingSummaryProviders: ClosingSummaryProvider[] = [];
-const departmentSummaryProviders: DepartmentSummaryProvider[] = [];
-
-/** Future modules call this once, at startup, to plug their figures into every year-end closing summary. */
-export function registerClosingSummaryProvider(provider: ClosingSummaryProvider): void {
-  closingSummaryProviders.push(provider);
+export interface HoldingCheck {
+  hasIssue: boolean;
+  amount: number;
 }
 
-/** Future modules call this once, at startup, to contribute their own rows to the department-wise closing review. */
-export function registerDepartmentSummaryProvider(provider: DepartmentSummaryProvider): void {
-  departmentSummaryProviders.push(provider);
+export interface BankPendingCheck {
+  hasIssue: boolean;
+  amount: number;
+  transactionCount: number;
+}
+
+/** Sum of `holdingAmount` across every module, for records still pending Verifier/Checker action in this Financial Year. */
+async function computeHoldingCheck(fyObjectId: Types.ObjectId): Promise<HoldingCheck> {
+  const pendingMatch = { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES } };
+  const amounts = await Promise.all([
+    sumField(ExpenditureModel, "holdingAmount", pendingMatch),
+    sumField(PayrollBatchModel, "holdingAmount", pendingMatch),
+    sumField(BudgetAllocationModel, "holdingAmount", pendingMatch),
+    sumField(BudgetSetupModel, "holdingAmount", pendingMatch),
+    sumField(FundTransferModel, "holdingAmount", pendingMatch),
+  ]);
+  const amount = amounts.reduce((sum, a) => sum + a, 0);
+  return { hasIssue: amount > 0, amount };
+}
+
+/** Expenditure + Payroll amounts sent for payment but not yet confirmed successful or failed by the bank/payment provider. */
+async function computeBankPendingCheck(fyObjectId: Types.ObjectId): Promise<BankPendingCheck> {
+  const bankPendingStatuses = ["PAYMENT_PENDING", "PAYMENT_PROCESSING"];
+  const [expenditureRows] = await ExpenditureModel.aggregate<{ _id: null; amount: number; count: number }>([
+    { $match: { financialYearId: fyObjectId, paymentStatus: { $in: bankPendingStatuses } } },
+    { $group: { _id: null, amount: { $sum: "$netPayableAmount" }, count: { $sum: 1 } } },
+  ]);
+  const [payrollRows] = await PayrollBatchModel.aggregate<{ _id: null; amount: number; count: number }>([
+    { $match: { financialYearId: fyObjectId } },
+    { $unwind: "$employees" },
+    { $match: { "employees.paymentStatus": { $in: bankPendingStatuses } } },
+    { $group: { _id: null, amount: { $sum: "$employees.netSalary" }, count: { $sum: 1 } } },
+  ]);
+  const amount = (expenditureRows?.amount ?? 0) + (payrollRows?.amount ?? 0);
+  const transactionCount = (expenditureRows?.count ?? 0) + (payrollRows?.count ?? 0);
+  return { hasIssue: amount > 0, amount, transactionCount };
+}
+
+/**
+ * Every (Organization Node, Head) pair, EXCLUDING the root node itself
+ * (root-level remaining is explicitly acceptable — spec §9), that still has
+ * an approved Budget Allocation balance (`amount - subAllocatedAmount > 0`)
+ * for this Financial Year. Purely informational — never auto-transfers
+ * anything; each flagged row points at the existing Return Funds flow
+ * (spec §10/§11).
+ */
+async function computeNodeHeadRemainingRows(fyObjectId: Types.ObjectId): Promise<DepartmentClosingRow[]> {
+  const rows = await BudgetAllocationModel.aggregate<{
+    _id: { organizationNodeId: Types.ObjectId; headId: Types.ObjectId | null };
+    amount: number;
+    subAllocated: number;
+  }>([
+    { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED" } },
+    { $group: { _id: { organizationNodeId: "$organizationNodeId", headId: "$headId" }, amount: { $sum: "$amount" }, subAllocated: { $sum: "$subAllocatedAmount" } } },
+  ]);
+  if (rows.length === 0) return [];
+
+  const nodeIds = [...new Set(rows.map((r) => String(r._id.organizationNodeId)))];
+  const headIds = [...new Set(rows.map((r) => r._id.headId).filter((id): id is Types.ObjectId => Boolean(id)).map(String))];
+  const [nodes, heads] = await Promise.all([
+    OrganizationNodeModel.find({ _id: { $in: nodeIds } }).select("name parentNodeId").lean(),
+    headIds.length > 0 ? SchemeHeadNodeModel.find({ _id: { $in: headIds } }).select("name").lean() : Promise.resolve([]),
+  ]);
+  const nodeById = new Map(nodes.map((n) => [String(n._id), n]));
+  const headNameById = new Map(heads.map((h) => [String(h._id), h.name]));
+
+  return rows
+    .filter((r) => {
+      const node = nodeById.get(String(r._id.organizationNodeId));
+      return node && node.parentNodeId !== null; // root-level remaining is acceptable, never flagged.
+    })
+    .map((r) => {
+      const node = nodeById.get(String(r._id.organizationNodeId))!;
+      const remainingAmount = r.amount - r.subAllocated;
+      return {
+        nodeId: String(r._id.organizationNodeId),
+        nodeName: node.name,
+        parentNodeName: node.parentNodeId ? (nodeById.get(String(node.parentNodeId))?.name ?? null) : null,
+        headId: r._id.headId ? String(r._id.headId) : null,
+        headName: r._id.headId ? headNameById.get(String(r._id.headId)) ?? null : null,
+        allocatedAmount: r.amount,
+        utilizedAmount: 0,
+        committedAmount: 0,
+        pendingAmount: 0,
+        remainingAmount,
+        hasPendingItems: remainingAmount > 0,
+      };
+    });
 }
 
 export interface ClosingSummaryDto {
@@ -427,87 +590,73 @@ export interface ClosingSummaryDto {
   remainingAmount: number;
   pendingTransactions: number;
   departmentsWithRemainingFunds: number;
+  holdingCheck: HoldingCheck;
+  bankPendingCheck: BankPendingCheck;
+  nodeHeadRemainingRows: DepartmentClosingRow[];
   canClose: boolean;
   blockingReasons: string[];
 }
 
 export async function getClosingSummary(id: string): Promise<ClosingSummaryDto> {
   const year = await findByIdOr404(id);
+  const fyObjectId = year._id;
 
-  const contributions = await Promise.all(
-    closingSummaryProviders.map((provider) => provider(String(year._id)))
-  );
-  const departmentRows = await getDepartmentSummary(id);
+  const [holdingCheck, bankPendingCheck, nodeHeadRemainingRows, allocatedAmount, utilizedExpenditure, utilizedPayroll] = await Promise.all([
+    computeHoldingCheck(fyObjectId),
+    computeBankPendingCheck(fyObjectId),
+    computeNodeHeadRemainingRows(fyObjectId),
+    sumField(BudgetAllocationModel, "amount", { financialYearId: fyObjectId, approvalStatus: "APPROVED" }),
+    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, paymentStatus: "PAYMENT_SUCCESS" }),
+    (async () => {
+      const [agg] = await PayrollBatchModel.aggregate<{ _id: null; amount: number }>([
+        { $match: { financialYearId: fyObjectId } },
+        { $unwind: "$employees" },
+        { $match: { "employees.paymentStatus": "PAYMENT_SUCCESS" } },
+        { $group: { _id: null, amount: { $sum: "$employees.netSalary" } } },
+      ]);
+      return agg?.amount ?? 0;
+    })(),
+  ]);
 
-  const allocatedAmount = contributions.reduce((sum, c) => sum + (c.allocatedAmount ?? 0), 0);
-  const utilizedAmount = contributions.reduce((sum, c) => sum + (c.utilizedAmount ?? 0), 0);
-  const committedAmount = contributions.reduce((sum, c) => sum + (c.committedAmount ?? 0), 0);
-  const pendingAmount = contributions.reduce((sum, c) => sum + (c.pendingAmount ?? 0), 0);
-  const remainingAmount = allocatedAmount - utilizedAmount - committedAmount - pendingAmount;
-  const pendingTransactions = contributions.reduce((sum, c) => sum + (c.pendingTransactionCount ?? 0), 0);
-  const departmentsWithRemainingFunds = departmentRows.filter((row) => row.remainingAmount > 0).length;
+  const utilizedAmount = utilizedExpenditure + utilizedPayroll;
+  const blockingRows = nodeHeadRemainingRows.filter((row) => row.hasPendingItems);
+  const nodeHeadRemainingTotal = blockingRows.reduce((sum, row) => sum + row.remainingAmount, 0);
+  const remainingAmount = allocatedAmount - utilizedAmount - holdingCheck.amount - bankPendingCheck.amount;
 
-  const blockingReasons: string[] = contributions.flatMap((c) => c.blockingReasons ?? []);
-  if (pendingTransactions > 0) {
+  const blockingReasons: string[] = [];
+  if (holdingCheck.hasIssue) blockingReasons.push(`Amount in Holding — ₹${holdingCheck.amount.toLocaleString("en-IN")} is still pending Verifier/Checker action.`);
+  if (bankPendingCheck.hasIssue) {
     blockingReasons.push(
-      `${pendingTransactions} pending transaction${pendingTransactions === 1 ? "" : "s"} require action.`
+      `Bank Response Pending — ₹${bankPendingCheck.amount.toLocaleString("en-IN")} across ${bankPendingCheck.transactionCount} transaction(s) is still awaiting a bank/payment-provider response.`
     );
   }
-  if (year.isClosed) {
-    blockingReasons.push("This Financial Year is already closed.");
+  if (blockingRows.length > 0) {
+    blockingReasons.push(`₹${nodeHeadRemainingTotal.toLocaleString("en-IN")} Remaining with Departments — return it to the Root via Fund Transfer before closing.`);
   }
-  if (year.isCurrent) {
-    blockingReasons.push("Cannot close the current Financial Year — wait until the next Financial Year begins.");
-  }
+  if (year.isClosed) blockingReasons.push("This Financial Year is already closed.");
+  if (year.isCurrent) blockingReasons.push("Cannot close the current Financial Year — wait until the next Financial Year begins.");
 
   return {
     financialYear: year.financialYear,
     status: year.status,
     allocatedAmount,
     utilizedAmount,
-    committedAmount,
-    pendingAmount,
+    committedAmount: holdingCheck.amount,
+    pendingAmount: bankPendingCheck.amount,
     remainingAmount,
-    pendingTransactions,
-    departmentsWithRemainingFunds,
+    pendingTransactions: bankPendingCheck.transactionCount,
+    departmentsWithRemainingFunds: blockingRows.length,
+    holdingCheck,
+    bankPendingCheck,
+    nodeHeadRemainingRows,
     canClose: blockingReasons.length === 0,
     blockingReasons,
   };
 }
 
-/**
- * Seeded from every active Organization Node at zero, then overlaid with
- * whatever real figures registered providers contribute — so the structure
- * is correct and testable now, before any Budget/Fund module exists.
- */
 export async function getDepartmentSummary(id: string): Promise<DepartmentClosingRow[]> {
   const year = await findByIdOr404(id);
-
-  const nodes = await OrganizationNodeModel.find({ status: "Active" }).select("name").lean();
-  const rowsByNodeId = new Map<string, DepartmentClosingRow>(
-    nodes.map((node) => [
-      String(node._id),
-      {
-        nodeId: String(node._id),
-        nodeName: node.name,
-        allocatedAmount: 0,
-        utilizedAmount: 0,
-        committedAmount: 0,
-        pendingAmount: 0,
-        remainingAmount: 0,
-        hasPendingItems: false,
-      },
-    ])
-  );
-
-  const contributedRows = (
-    await Promise.all(departmentSummaryProviders.map((provider) => provider(String(year._id))))
-  ).flat();
-  for (const row of contributedRows) {
-    rowsByNodeId.set(row.nodeId, row);
-  }
-
-  return [...rowsByNodeId.values()];
+  return computeNodeHeadRemainingRows(year._id);
 }
 
 export async function closeBooks(id: string, context: ActorContext): Promise<FinancialYearDto> {
@@ -552,6 +701,14 @@ export async function closeBooks(id: string, context: ActorContext): Promise<Fin
   year.isClosed = true;
   year.closedAt = new Date();
   year.closedBy = context.actorId;
+  // Closing a year always resets both access flags (spec §14) — a closed
+  // year can never have either enabled.
+  year.entryEnabled = false;
+  year.entryEnabledAt = null;
+  year.entryEnabledBy = null;
+  year.viewOnly = false;
+  year.viewOnlyEnabledAt = null;
+  year.viewOnlyEnabledBy = null;
   year.updatedBy = context.actorId;
   await year.save();
 
@@ -607,9 +764,17 @@ export async function reopenFinancialYear(
 // ---------------------------------------------------------------------------
 
 /**
- * Throws unless `financialYearId` may currently receive new or modified
- * entries: must exist, must not be closed, and must be either the current
- * year or a previous year with previousYearEntryAllowed explicitly enabled.
+ * Throws unless `financialYearId` may currently receive new, modified, or
+ * approval-workflow entries (spec §17/§18 — every financial module, and
+ * every stage of its Maker/Verifier/Checker workflow, routes through this
+ * one function; the backend, never the frontend, decides). Three-state
+ * gate, in order:
+ *  1. Closed — never writable, regardless of `isCurrent`.
+ *  2. View Only — never writable, regardless of `isCurrent` (a Super Admin
+ *     can lock down even the current year this way).
+ *  3. Not the current year and `entryEnabled` was never turned on for it.
+ * The current year defaults to `entryEnabled: true` (see `markAsCurrent`),
+ * so it stays writable out of the box unless explicitly restricted above.
  */
 export async function assertFinancialYearIsWritable(
   financialYearId: string | Types.ObjectId
@@ -623,10 +788,16 @@ export async function assertFinancialYearIsWritable(
       `Financial Year "${year.financialYear}" is closed and cannot accept new or modified entries.`
     );
   }
-  if (!year.isCurrent && !year.previousYearEntryAllowed) {
+  if (year.viewOnly) {
     throw new AppError(
       422,
-      `Entries are not allowed for Financial Year "${year.financialYear}" — it is not the current year and previous-year entry has not been enabled by a Super Admin.`
+      `Financial Year "${year.financialYear}" is in View Only mode — no new or modified entries are allowed.`
+    );
+  }
+  if (!year.isCurrent && !year.entryEnabled) {
+    throw new AppError(
+      422,
+      `Entries are not allowed for Financial Year "${year.financialYear}" — it is not the current year and entry has not been enabled by a Super Admin.`
     );
   }
 
@@ -651,7 +822,7 @@ interface PreviousYearEntryAuditParams {
  */
 export async function logPreviousYearEntryUsage(params: PreviousYearEntryAuditParams): Promise<void> {
   const year = await FinancialYearModel.findById(params.financialYearId).select(
-    "financialYear previousYearEntryEnabledBy"
+    "financialYear entryEnabledBy"
   );
 
   await logActivity({

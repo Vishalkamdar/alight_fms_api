@@ -11,6 +11,8 @@ import {
   requestLoginOtpSchema,
   resetPasswordSchema,
   signupSchema,
+  updateProfileSchema,
+  verifyEmailChangeSchema,
   verifyLoginOtpSchema,
 } from "../schemas/auth.schema";
 import * as authController from "../controllers/auth.controller";
@@ -81,6 +83,21 @@ router.post(
   authRateLimiter,
   validate(resetPasswordSchema, "body"),
   authController.resetPassword
+);
+
+router.patch("/me", authenticate, validate(updateProfileSchema, "body"), authController.updateProfile);
+
+// Multipart — multer parses the file itself inside the controller, so no
+// JSON body validate() middleware runs here (same pattern as every other
+// upload route in this app, e.g. uploadSystemLogo/addExpenditureDocument).
+router.post("/me/photo", authenticate, authController.uploadProfilePhoto);
+router.delete("/me/photo", authenticate, authController.removeProfilePhoto);
+
+router.post(
+  "/verify-email-change",
+  passwordResetRateLimiter,
+  validate(verifyEmailChangeSchema, "body"),
+  authController.verifyEmailChange
 );
 
 export default router;

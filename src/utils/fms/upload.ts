@@ -194,3 +194,75 @@ export const uploadPayrollDocument = multer({
     callback(null, true);
   },
 }).single("document");
+
+/**
+ * Disk storage for a user's own profile photo — same pattern as the
+ * branding logo, own directory, no SVG (a profile photo is a raster image,
+ * never a vector).
+ */
+const PROFILE_PHOTOS_DIR = path.join(UPLOAD_ROOT_DIR, "profile-photos");
+fs.mkdirSync(PROFILE_PHOTOS_DIR, { recursive: true });
+
+const ALLOWED_PROFILE_PHOTO_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const MAX_PROFILE_PHOTO_SIZE_BYTES = 2 * 1024 * 1024; // 2MB
+
+const profilePhotoStorage = multer.diskStorage({
+  destination: (_req, _file, callback) => {
+    callback(null, PROFILE_PHOTOS_DIR);
+  },
+  filename: (_req, file, callback) => {
+    const uniqueSuffix = crypto.randomBytes(8).toString("hex");
+    const extension = path.extname(file.originalname).toLowerCase() || ".png";
+    callback(null, `profile-${Date.now()}-${uniqueSuffix}${extension}`);
+  },
+});
+
+export const uploadProfilePhoto = multer({
+  storage: profilePhotoStorage,
+  limits: { fileSize: MAX_PROFILE_PHOTO_SIZE_BYTES },
+  fileFilter: (_req, file, callback) => {
+    if (!ALLOWED_PROFILE_PHOTO_MIME_TYPES.has(file.mimetype)) {
+      callback(new Error("Only PNG, JPEG, or WEBP photos are allowed."));
+      return;
+    }
+    callback(null, true);
+  },
+}).single("photo");
+
+export function profilePhotoPath(storedFileName: string): string {
+  return path.join(PROFILE_PHOTOS_DIR, storedFileName);
+}
+
+/**
+ * multer's fileFilter only sees the client-reported mimetype before the
+ * file is written — every other upload in this app stops there, but a
+ * profile photo is public-facing (rendered in the header for everyone who
+ * can see this user), so it gets one extra check nothing else here has: the
+ * real magic bytes of the file actually written to disk, to catch a
+ * renamed/relabeled non-image slipping past the mimetype check.
+ */
+export async function isValidImageSignature(filePath: string, mimetype: string): Promise<boolean> {
+  const handle = await fs.promises.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(12);
+    const { bytesRead } = await handle.read(buffer, 0, 12, 0);
+    if (bytesRead < 4) return false;
+
+    if (mimetype === "image/png") {
+      return buffer.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    }
+    if (mimetype === "image/jpeg") {
+      return buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
+    }
+    if (mimetype === "image/webp") {
+      return (
+        bytesRead >= 12 &&
+        buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+        buffer.subarray(8, 12).toString("ascii") === "WEBP"
+      );
+    }
+    return false;
+  } finally {
+    await handle.close();
+  }
+}
