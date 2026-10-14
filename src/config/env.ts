@@ -30,8 +30,15 @@ const envSchema = z.object({
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
-  console.error("Invalid environment configuration:", parsed.error.flatten().fieldErrors);
-  process.exit(1);
+  // process.exit() here is a landmine on serverless hosts (Vercel): it kills
+  // the function with an opaque FUNCTION_INVOCATION_FAILED and no stack
+  // trace in the logs. Throwing instead still fails every request (this
+  // module is imported before anything else runs) but leaves a real,
+  // diagnosable error — "Invalid environment configuration: {...}" — in the
+  // function logs instead of a silent kill.
+  throw new Error(
+    `Invalid environment configuration: ${JSON.stringify(parsed.error.flatten().fieldErrors)}`
+  );
 }
 
 export const env = {
