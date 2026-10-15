@@ -3,18 +3,21 @@
  * exist from _UAT_1_provisionUsers.ts — this script only touches
  * passwords) and prints a fresh credentials table.
  *
+ * Passwords follow a fixed, memorable scheme for manual testing
+ * (`<email-local-part>@123`, e.g. root.maker@123) rather than random
+ * generation — set by explicit request, bypasses the normal password
+ * complexity policy since this writes the hash directly, not through the
+ * validated change-password API.
+ *
  * Usage: npx tsx src/scripts/_UAT_3_resetPasswords.ts
  */
 import mongoose from "mongoose";
-import crypto from "crypto";
 import { connectDatabase } from "../config/db";
 import { UserModel } from "../models/User";
 import { hashPassword } from "../utils/password";
 
-function randomPassword(): string {
-  const special = "!@#$%";
-  const body = crypto.randomBytes(9).toString("base64").replace(/[+/=]/g, "x");
-  return `Uat${body}${special[Math.floor(Math.random() * special.length)]}9`;
+function fixedPassword(email: string): string {
+  return `${email.split("@")[0]}@123`;
 }
 
 const USERS = [
@@ -35,7 +38,7 @@ async function main() {
     const user = await UserModel.findOne({ email: spec.email });
     if (!user) throw new Error(`${spec.email} not found — run _UAT_1_provisionUsers.ts first.`);
 
-    const password = randomPassword();
+    const password = fixedPassword(spec.email);
     user.password = await hashPassword(password);
     user.isActive = true;
     await user.save();
