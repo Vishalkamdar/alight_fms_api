@@ -1,11 +1,9 @@
 import { Types } from "mongoose";
-import fs from "fs/promises";
-import path from "path";
 import { recordAudit } from "../../utils/fms/audit-log";
 import { logActivity } from "../../utils/activity-log";
 import { FmsSystemConfigModel, FmsSystemConfigDocument } from "../../models/fms/FmsSystemConfig";
 import type { UpdateSystemConfigInput } from "../../schemas/fms/system-config.schema";
-import { UPLOAD_ROOT_DIR } from "../../utils/fms/upload";
+import { uploadToBlob, deleteFromBlob } from "../../utils/fms/blob-storage";
 
 interface ActorContext {
   ipAddress: string | null;
@@ -62,25 +60,20 @@ export async function updateConfig(
 }
 
 export async function replaceLogo(
-  storedFileName: string,
+  file: Express.Multer.File,
   actorId: Types.ObjectId,
   context: ActorContext
 ): Promise<FmsSystemConfigDocument> {
   const config = await getOrCreateConfig();
   const previousLogoUrl = config.logoUrl;
 
-  config.logoUrl = `/uploads/branding/${storedFileName}`;
+  const { url } = await uploadToBlob("branding", "logo", file.originalname, file.buffer, file.mimetype);
+  config.logoUrl = url;
   config.updatedBy = actorId;
   await config.save();
 
-  // Best-effort cleanup of the previous logo file — never fail the request over it.
-  if (previousLogoUrl) {
-    const previousFileName = path.basename(previousLogoUrl);
-    const previousFilePath = path.join(UPLOAD_ROOT_DIR, "branding", previousFileName);
-    fs.unlink(previousFilePath).catch(() => {
-      // Ignore — the file may already be gone, or this is a fresh singleton with no prior logo.
-    });
-  }
+  // Best-effort cleanup of the previous logo blob — never fail the request over it.
+  await deleteFromBlob(previousLogoUrl);
 
   await recordAudit({
     user: actorId,

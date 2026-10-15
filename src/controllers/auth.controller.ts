@@ -1,6 +1,5 @@
 import { Response } from "express";
 import { Types } from "mongoose";
-import fs from "fs";
 import * as authService from "../services/auth.service";
 import { sendSuccess } from "../utils/apiResponse";
 import { AppError } from "../utils/AppError";
@@ -118,15 +117,12 @@ export async function uploadProfilePhoto(req: AuthenticatedRequest, res: Respons
     throw new AppError(400, "A photo file is required.");
   }
 
-  const isGenuineImage = await isValidImageSignature(req.file.path, req.file.mimetype);
+  const isGenuineImage = isValidImageSignature(req.file.buffer, req.file.mimetype);
   if (!isGenuineImage) {
-    fs.unlink(req.file.path, () => {
-      // Best-effort cleanup of the rejected file.
-    });
     throw new AppError(400, "This file is not a valid PNG, JPEG, or WEBP image.");
   }
 
-  const user = await authService.uploadProfilePhoto(req.user, req.file.filename, requestContext(req));
+  const user = await authService.uploadProfilePhoto(req.user, req.file, requestContext(req));
   sendSuccess(res, user, { message: "Profile photo updated." });
 }
 

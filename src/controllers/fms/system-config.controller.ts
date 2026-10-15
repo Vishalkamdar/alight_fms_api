@@ -36,6 +36,6 @@ export async function uploadSystemLogo(req: AuthenticatedRequest, res: Response)
   }
 
   const context = getActorContext(req);
-  const config = await systemConfigService.replaceLogo(req.file.filename, context.actorId, context);
+  const config = await systemConfigService.replaceLogo(req.file, context.actorId, context);
   sendSuccess(res, config, { message: "Logo updated successfully." });
 }

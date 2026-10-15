@@ -1,6 +1,7 @@
 import mongoose, { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
 import { logActivity } from "../../utils/activity-log";
+import { uploadToBlob } from "../../utils/fms/blob-storage";
 import { BudgetAllocationModel, type BudgetAllocationDocument } from "../../models/fms/BudgetAllocation";
 import { FundTransferModel } from "../../models/fms/FundTransfer";
 import { BudgetSetupModel } from "../../models/fms/BudgetSetup";
@@ -1666,10 +1667,17 @@ export async function addBudgetAllocationDocuments(
     throw new AppError(404, "One or more Budget Allocations were not found.");
   }
 
+  const { url, storedFileName } = await uploadToBlob(
+    "budget-allocations",
+    "doc",
+    file.originalname,
+    file.buffer,
+    file.mimetype
+  );
   const attachment = {
-    fileName: file.filename,
+    fileName: storedFileName,
     originalName: file.originalname,
-    fileUrl: `/uploads/budget-allocations/${file.filename}`,
+    fileUrl: url,
     mimeType: file.mimetype,
     size: file.size,
     uploadedBy: context.actorId,

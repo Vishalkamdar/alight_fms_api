@@ -22,8 +22,7 @@ import {
   sendWelcomeEmail,
 } from "./email.service";
 import { getOrCreateConfiguration } from "./fms/configuration.service";
-import { profilePhotoPath } from "../utils/fms/upload";
-import fs from "fs";
+import { uploadToBlob, deleteFromBlob } from "../utils/fms/blob-storage";
 import type { LoginInput, SignupInput, UpdateProfileInput } from "../schemas/auth.schema";
 
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -642,10 +641,10 @@ export async function verifyEmailChange(
   return toSafeUser(user);
 }
 
-/** Replaces the caller's profile photo, best-effort deleting the previous file — mirrors replaceLogo's pattern. */
+/** Replaces the caller's profile photo, best-effort deleting the previous blob — mirrors replaceLogo's pattern. */
 export async function uploadProfilePhoto(
   user: UserDocument,
-  storedFileName: string,
+  file: Express.Multer.File,
   context: RequestContext
 ): Promise<ReturnType<typeof toSafeUser>> {
   const fullUser = await UserModel.findById(user._id);
@@ -654,17 +653,11 @@ export async function uploadProfilePhoto(
   }
 
   const previousUrl = fullUser.profilePhotoUrl;
-  fullUser.profilePhotoUrl = `/uploads/profile-photos/${storedFileName}`;
+  const { url } = await uploadToBlob("profile-photos", "profile", file.originalname, file.buffer, file.mimetype);
+  fullUser.profilePhotoUrl = url;
   await fullUser.save();
 
-  if (previousUrl) {
-    const previousFileName = previousUrl.split("/").pop();
-    if (previousFileName) {
-      fs.unlink(profilePhotoPath(previousFileName), () => {
-        // Best-effort — the DB record is already updated and is the source of truth.
-      });
-    }
-  }
+  await deleteFromBlob(previousUrl);
 
   await logActivity({
     user: fullUser._id,
@@ -692,14 +685,7 @@ export async function removeProfilePhoto(
   fullUser.profilePhotoUrl = null;
   await fullUser.save();
 
-  if (previousUrl) {
-    const previousFileName = previousUrl.split("/").pop();
-    if (previousFileName) {
-      fs.unlink(profilePhotoPath(previousFileName), () => {
-        // Best-effort — the DB record is already updated and is the source of truth.
-      });
-    }
-  }
+  await deleteFromBlob(previousUrl);
 
   await logActivity({
     user: fullUser._id,

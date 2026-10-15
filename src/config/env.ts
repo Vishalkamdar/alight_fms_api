@@ -25,6 +25,9 @@ const envSchema = z.object({
     .string()
     .regex(/^[0-9a-f]{64}$/i, "FMS_ENCRYPTION_KEY must be a 32-byte (64 hex character) key.")
     .describe("AES-256-GCM key used to encrypt OTP provider credentials at rest."),
+
+  BLOB_READ_WRITE_TOKEN: z.string().min(1, "BLOB_READ_WRITE_TOKEN is required."),
+  FMSP_STORE_ID: z.string().optional(), // informational only — @vercel/blob reads BLOB_READ_WRITE_TOKEN itself
 });
 
 const parsed = envSchema.safeParse(process.env);

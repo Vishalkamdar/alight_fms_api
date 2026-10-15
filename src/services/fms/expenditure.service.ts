@@ -1,6 +1,7 @@
 import mongoose, { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
 import { logActivity } from "../../utils/activity-log";
+import { uploadToBlob } from "../../utils/fms/blob-storage";
 import { ExpenditureModel, type ExpenditureDocument, type ExpenditureDeductionSnapshot, type ExpenditureSourcePool } from "../../models/fms/Expenditure";
 import { BeneficiaryModel } from "../../models/fms/Beneficiary";
 import { DeductionMasterModel } from "../../models/fms/DeductionMaster";
@@ -955,11 +956,12 @@ export async function addExpenditureDocument(
   const doc = await ExpenditureModel.findById(id);
   if (!doc) throw new AppError(404, "Expenditure not found.");
 
+  const { url, storedFileName } = await uploadToBlob("expenditures", "doc", file.originalname, file.buffer, file.mimetype);
   doc.attachments.push({
     documentInfo: documentInfo?.trim() || null,
-    fileName: file.filename,
+    fileName: storedFileName,
     originalName: file.originalname,
-    fileUrl: `/uploads/expenditures/${file.filename}`,
+    fileUrl: url,
     mimeType: file.mimetype,
     size: file.size,
     uploadedBy: context.actorId,

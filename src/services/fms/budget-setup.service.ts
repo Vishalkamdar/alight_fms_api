@@ -1,9 +1,7 @@
-import fs from "fs";
-import path from "path";
 import mongoose, { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
 import { logActivity } from "../../utils/activity-log";
-import { UPLOAD_ROOT_DIR } from "../../utils/fms/upload";
+import { uploadToBlob, deleteFromBlob } from "../../utils/fms/blob-storage";
 import { BudgetSetupModel, type BudgetSetupDocument, type FmsStatus } from "../../models/fms/BudgetSetup";
 import { OrganizationNodeModel } from "../../models/OrganizationNode";
 import { SchemeHeadNodeModel } from "../../models/SchemeHeadNode";
@@ -1073,10 +1071,11 @@ export async function addBudgetSetupDocument(
 ): Promise<BudgetSetupDto> {
   const doc = await findByIdOr404(id);
 
+  const { url, storedFileName } = await uploadToBlob("budget-setups", "doc", file.originalname, file.buffer, file.mimetype);
   doc.attachments.push({
-    fileName: file.filename,
+    fileName: storedFileName,
     originalName: file.originalname,
-    fileUrl: `/uploads/budget-setups/${file.filename}`,
+    fileUrl: url,
     mimeType: file.mimetype,
     size: file.size,
     uploadedBy: context.actorId,
@@ -1110,18 +1109,14 @@ export async function removeBudgetSetupDocument(
   if (!attachment) throw new AppError(404, "Document not found on this Budget Setup.");
 
   const originalName = attachment.originalName;
-  const storedFileName = attachment.fileName;
+  const fileUrl = attachment.fileUrl;
   doc.attachments.pull({ _id: documentId });
   doc.updatedBy = context.actorId;
   await doc.save();
 
-  // Best-effort disk cleanup — a failure here must not fail the request;
-  // the DB record (source of truth for what's "attached") is already updated.
-  try {
-    fs.unlinkSync(path.join(UPLOAD_ROOT_DIR, "budget-setups", storedFileName));
-  } catch (error) {
-    console.error("[budget-setup] failed to delete attachment file:", error);
-  }
+  // Best-effort cleanup — a failure here must not fail the request; the DB
+  // record (source of truth for what's "attached") is already updated.
+  await deleteFromBlob(fileUrl);
 
   await logActivity({
     user: context.actorId,

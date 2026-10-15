@@ -5,7 +5,6 @@ import morgan from "morgan";
 import { env } from "./config/env";
 import routes from "./routes";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
-import { UPLOAD_ROOT_DIR } from "./utils/fms/upload";
 
 export function createApp(): Express {
   const app = express();
@@ -23,8 +22,6 @@ export function createApp(): Express {
   app.get("/health", (_req, res) => {
     res.json({ success: true, data: { status: "ok" } });
   });
-
-  app.use("/uploads", express.static(UPLOAD_ROOT_DIR));
 
   app.use("/api", routes);
 

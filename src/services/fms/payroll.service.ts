@@ -1,6 +1,7 @@
 import mongoose, { Types } from "mongoose";
 import { AppError } from "../../utils/AppError";
 import { logActivity } from "../../utils/activity-log";
+import { uploadToBlob } from "../../utils/fms/blob-storage";
 import {
   PayrollBatchModel,
   type PayrollBatchDocument,
@@ -899,11 +900,12 @@ export async function addPayrollBatchDocument(
   const doc = await PayrollBatchModel.findById(id);
   if (!doc) throw new AppError(404, "Payroll batch not found.");
 
+  const { url, storedFileName } = await uploadToBlob("payroll-batches", "doc", file.originalname, file.buffer, file.mimetype);
   doc.attachments.push({
     documentInfo: documentInfo?.trim() || null,
-    fileName: file.filename,
+    fileName: storedFileName,
     originalName: file.originalname,
-    fileUrl: `/uploads/payroll-batches/${file.filename}`,
+    fileUrl: url,
     mimeType: file.mimetype,
     size: file.size,
     uploadedBy: context.actorId,
