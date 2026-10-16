@@ -191,31 +191,27 @@ export async function getTrueDescendantNodeIds(ancestorNodeIds: string[]): Promi
  * configured ancestor — see resolveGoverningNodeId): if the role is
  * disabled there, nobody can act, full stop.
  *
- * Who counts as assigned differs by role: Maker authority flows DOWN a
- * parent→child chain — an assignment on this node OR any real ancestor
- * qualifies (getAncestorNodeIds), regardless of whether intervening nodes
- * have their own FmsNodeRoleConfig. Verifier/Checker stay exact — only an
- * assignment at the node's own governing node counts, preserving
- * per-department approval authority even when an ancestor's Maker has
- * pushed a transaction down into it.
+ * Authority flows DOWN a parent→child chain for every role — an assignment
+ * on this node OR any real ancestor qualifies (getAncestorNodeIds),
+ * regardless of whether intervening nodes have their own FmsNodeRoleConfig.
+ * An upper-level Maker can push a transaction into a descendant, and an
+ * upper-level Verifier/Checker can act on it too — mirrors how a single
+ * HQ-level Maker/Verifier/Checker trio commonly handles every department's
+ * entries, while a department with its own staffed trio can still act on
+ * its own entries independently (both reach the same node).
  */
 export async function hasNodeRole(userId: IdLike, nodeId: IdLike, role: FmsRole): Promise<boolean> {
   const governingNodeId = await resolveGoverningNodeId(nodeId);
   const enabled = await isNodeRoleEnabled(governingNodeId, role);
   if (!enabled) return false;
 
-  if (role === "Maker") {
-    const ancestorNodeIds = await getAncestorNodeIds(nodeId);
-    const assigned = await FmsUserNodeRoleModel.exists({
-      user: userId,
-      node: { $in: ancestorNodeIds },
-      role: "Maker",
-      status: "Active",
-    });
-    return Boolean(assigned);
-  }
-
-  const assigned = await FmsUserNodeRoleModel.exists({ user: userId, node: governingNodeId, role, status: "Active" });
+  const ancestorNodeIds = await getAncestorNodeIds(nodeId);
+  const assigned = await FmsUserNodeRoleModel.exists({
+    user: userId,
+    node: { $in: ancestorNodeIds },
+    role,
+    status: "Active",
+  });
   return Boolean(assigned);
 }
 

@@ -84,6 +84,17 @@ export interface BudgetSetupDto {
   originalAmount: number;
   allocatedAmount: number;
   remainingAmount: number;
+  /**
+   * The portion of `allocatedAmount` that's reserved by Budget Allocations
+   * still pending Verifier/Checker approval (sum of their own
+   * `holdingAmount`) — `allocatedAmount` itself was always "approved +
+   * pending" combined (money is reserved at Maker-submission, not at final
+   * approval), so a summary tile labeled "Total Allocation" needs this
+   * split out to only show the truly-approved portion, with the rest
+   * folded into "Total Hold" instead. Only populated on the list/aggregated
+   * path (what the summary tiles consume) — undefined elsewhere.
+   */
+  pendingAllocationHoldingAmount?: number;
   remarks: string | null;
   attachments: BudgetSetupAttachmentDto[];
   status: FmsStatus;
@@ -264,6 +275,7 @@ interface AggregatedBudgetSetupRow {
   originalAmount: number;
   allocatedAmount: number;
   remainingAmount: number;
+  pendingAllocationHoldingAmount: number;
   remarks: string | null;
   attachments: Array<{
     _id: Types.ObjectId;
@@ -313,6 +325,7 @@ function serializeAggregatedRow(row: AggregatedBudgetSetupRow): BudgetSetupDto {
     originalAmount: row.originalAmount,
     allocatedAmount: row.allocatedAmount,
     remainingAmount: row.remainingAmount,
+    pendingAllocationHoldingAmount: row.pendingAllocationHoldingAmount,
     remarks: row.remarks,
     attachments: row.attachments.map((attachment) => ({
       _id: String(attachment._id),
@@ -412,7 +425,37 @@ function buildBudgetSetupsPipeline(
       },
     },
     { $unwind: { path: "$maker", preserveNullAndEmptyArrays: true } },
-    { $addFields: { remainingAmount: { $subtract: ["$originalAmount", "$allocatedAmount"] } } },
+    {
+      // How much of this pool's allocatedAmount is still reserved by
+      // Budget Allocations pending Verifier/Checker approval (their own
+      // holdingAmount, 0 once approved/rejected) — see
+      // pendingAllocationHoldingAmount's doc comment on BudgetSetupDto.
+      $lookup: {
+        from: "budgetallocations",
+        let: { orgId: "$organizationNodeId", schemeId: "$schemeHeadNodeId", fyId: "$financialYearId" },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ["$organizationRootNodeId", "$$orgId"] },
+                  { $eq: ["$schemeHeadRootNodeId", "$$schemeId"] },
+                  { $eq: ["$financialYearId", "$$fyId"] },
+                ],
+              },
+            },
+          },
+          { $group: { _id: null, pendingAmount: { $sum: "$holdingAmount" } } },
+        ],
+        as: "pendingAllocations",
+      },
+    },
+    {
+      $addFields: {
+        remainingAmount: { $subtract: ["$originalAmount", "$allocatedAmount"] },
+        pendingAllocationHoldingAmount: { $ifNull: [{ $arrayElemAt: ["$pendingAllocations.pendingAmount", 0] }, 0] },
+      },
+    },
   ];
 
   if (query.search) {

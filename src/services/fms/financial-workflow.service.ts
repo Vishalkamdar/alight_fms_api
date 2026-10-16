@@ -6,7 +6,6 @@ import {
   getUserNodes,
   operationalRoleForSystemRole,
   resolveGoverningNodeId,
-  getDescendantNodeIdsGovernedBy,
   getTrueDescendantNodeIds,
 } from "../../utils/fms/node-permission";
 import { getUserHeads, getDescendantHeadIdsGovernedBy } from "../../utils/fms/head-permission";
@@ -70,13 +69,12 @@ export interface ActorForPermission {
 /**
  * Every Organization Node id the user may act as `role` on right now — or
  * the literal "ALL" for Super Admin, who bypasses per-node assignment.
- * Expanded to include every descendant node that has no config of its own
- * and so inherits one of these assigned nodes' workflow (see
- * resolveGoverningNodeId/getDescendantNodeIdsGovernedBy) — a Verifier
- * assigned on "Tech" must see a pending transaction targeting "QA Team"
- * too, since Tech's config is what actually governs it. Used to scope "my
- * pending approvals" queries (§3/§4 — Verifier/Checker only ever see what
- * they're actually authorized to act on).
+ * Expanded to every true descendant of the assigned node(s) via the real
+ * node tree (getTrueDescendantNodeIds), matching hasNodeRole — an
+ * upper-level Verifier/Checker assigned on "Tech" (or higher) must see a
+ * pending transaction targeting any descendant too, even one with its own
+ * full role configuration, same as a department's own staffed Verifier/
+ * Checker can. Used to scope "my pending approvals" queries.
  */
 export async function getMyActionableNodeIds(
   actor: ActorForPermission,
@@ -85,31 +83,25 @@ export async function getMyActionableNodeIds(
   if (actor.actorRole === "Super Admin") return "ALL";
   const nodes = await getUserNodes(actor.actorId);
   const assignedNodeIds = nodes.filter((node) => node.role === role).map((node) => node.nodeId);
-  return getDescendantNodeIdsGovernedBy(assignedNodeIds);
+  return getTrueDescendantNodeIds(assignedNodeIds);
 }
 
 /**
  * Restricts a Budget Setup/Allocation list, export, or single-record view to
  * the nodes the caller may actually see — null means unrestricted (Super
  * Admin, Admin), an array means "only these" (FMS Operational User -
- * Maker, scoped to their own assigned nodes plus every descendant node that
- * inherits one of those nodes' workflow — a Maker assigned on "Tech" can
- * also create/see entries for "QA Team", which has no config of its own;
- * §9 — Maker never browses another department's data). Verifier/Checker
- * never call this: they have no Budget Management access at all, only the
- * separate my-pending endpoint.
+ * Maker/Verifier/Checker, scoped to their own assigned nodes plus every true
+ * descendant node — authority flows down the real node tree regardless of
+ * whether a descendant has its own role configuration, matching
+ * hasNodeRole; §9 — a role never browses ABOVE or SIDEWAYS from its own
+ * assigned node(s), only down).
  */
 export async function getAllowedNodeIdsForList(actor: ActorForPermission): Promise<string[] | null> {
   const fmsRole = operationalRoleForSystemRole(actor.actorRole);
   if (!fmsRole) return null;
   const nodes = await getUserNodes(actor.actorId);
   const assignedNodeIds = nodes.filter((node) => node.role === fmsRole).map((node) => node.nodeId);
-  // Maker authority flows down the real node tree (see hasNodeRole) — the
-  // list/picker scoping must match, or the "new" form would silently accept
-  // a node it never offers as a choice. Verifier/Checker stay governed-only.
-  return fmsRole === "Maker"
-    ? getTrueDescendantNodeIds(assignedNodeIds)
-    : getDescendantNodeIdsGovernedBy(assignedNodeIds);
+  return getTrueDescendantNodeIds(assignedNodeIds);
 }
 
 /**
