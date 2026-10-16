@@ -94,9 +94,22 @@ export async function getBudgetKpis(
   ]);
   const onHold = onHoldExpenditure + onHoldPayroll + onHoldAllocation + onHoldSetup + onHoldTransfer;
 
+  // "Total Expenditure"/"Total Payroll" are final spent-money figures — a
+  // bill/batch still pending Verifier/Checker approval (already counted in
+  // onHold above) or rejected must never inflate them.
   const [totalExpenditure, totalPayroll] = await Promise.all([
-    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds), ...headMatch }),
-    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds), ...payrollHeadMatch }),
+    sumField(ExpenditureModel, "netPayableAmount", {
+      financialYearId: fyObjectId,
+      approvalStatus: "APPROVED",
+      ...nodeFilter(effectiveNodeIds),
+      ...headMatch,
+    }),
+    sumField(PayrollBatchModel, "totalNetSalary", {
+      financialYearId: fyObjectId,
+      approvalStatus: "APPROVED",
+      ...nodeFilter(effectiveNodeIds),
+      ...payrollHeadMatch,
+    }),
   ]);
 
   return { totalBudget, allocated, available, onHold, totalExpenditure, totalPayroll };
@@ -280,7 +293,7 @@ export async function computeNodeFinancialSummaries(
       { $group: { _id: "$organizationNodeId", amount: { $sum: "$amount" }, subAllocated: { $sum: "$subAllocatedAmount" } } },
     ]),
     ExpenditureModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
-      { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
+      { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch, ...headMatch } },
       { $group: { _id: "$organizationNodeId", amount: { $sum: "$netPayableAmount" } } },
     ]),
     ExpenditureModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
@@ -359,7 +372,7 @@ export async function computeHeadFinancialSummaries(
       { $group: { _id: "$headId", amount: { $sum: "$amount" }, subAllocated: { $sum: "$subAllocatedAmount" } } },
     ]),
     ExpenditureModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
-      { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
+      { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch, ...headMatch } },
       { $group: { _id: "$headId", amount: { $sum: "$netPayableAmount" } } },
     ]),
     ExpenditureModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
@@ -443,12 +456,12 @@ export async function getExpenditureOverview(
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
   const [thisMonth, approved, pending, paid, trendRows] = await Promise.all([
-    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, billVoucherDate: { $gte: startOfMonth }, ...nodeMatch, ...headMatch }),
+    sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, approvalStatus: "APPROVED", billVoucherDate: { $gte: startOfMonth }, ...nodeMatch, ...headMatch }),
     sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch, ...headMatch }),
     sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...headMatch }),
     sumField(ExpenditureModel, "netPayableAmount", { financialYearId: fyObjectId, paymentStatus: "PAYMENT_SUCCESS", ...nodeMatch, ...headMatch }),
     ExpenditureModel.aggregate<{ _id: string; amount: number }>([
-      { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
+      { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch, ...headMatch } },
       { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$billVoucherDate", timezone: "UTC" } }, amount: { $sum: "$netPayableAmount" } } },
     ]),
   ]);
@@ -469,11 +482,11 @@ export async function getPayrollOverview(
   const currentMonthName = new Date().toLocaleString("en-US", { month: "long" });
 
   const [currentMonthPayroll, pendingApproval, paid, trendRows, employeeAgg] = await Promise.all([
-    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, month: currentMonthName, ...nodeMatch, ...headMatch }),
+    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, approvalStatus: "APPROVED", month: currentMonthName, ...nodeMatch, ...headMatch }),
     sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...headMatch }),
     sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, paymentStatus: "PAYMENT_SUCCESS", ...nodeMatch, ...headMatch }),
     PayrollBatchModel.aggregate<{ _id: string; amount: number }>([
-      { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
+      { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch, ...headMatch } },
       { $group: { _id: "$month", amount: { $sum: "$totalNetSalary" } } },
     ]),
     PayrollBatchModel.aggregate<{ _id: null; employeeIds: Types.ObjectId[] }>([

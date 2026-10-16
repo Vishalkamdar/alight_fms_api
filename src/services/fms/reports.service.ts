@@ -628,7 +628,7 @@ export async function getOrganizationNodeFinancialReport(filters: ReportFilters,
   const nodeRows = await computeNodeFinancialSummaries(fyObjectId, effectiveNodeIds);
 
   const payrollRows = await PayrollBatchModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
-    { $match: { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds) } },
+    { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeFilter(effectiveNodeIds) } },
     { $group: { _id: "$organizationNodeId", amount: { $sum: "$totalNetSalary" } } },
   ]);
   const payrollMap = new Map(payrollRows.map((r) => [String(r._id), r.amount]));
@@ -668,7 +668,11 @@ export async function getBeneficiaryPaymentReport(filters: ReportFilters, actor:
   const { fyObjectId, effectiveNodeIds } = await scope(actor, filters);
   const nodeMatch = nodeFilter(effectiveNodeIds);
 
-  const expenditureMatch: Record<string, unknown> = { financialYearId: fyObjectId, ...nodeMatch };
+  // Only APPROVED transactions are real payment obligations — an
+  // unapproved or rejected bill/payroll entry must never inflate a
+  // beneficiary's grossAmount/netAmount, nor sit in pendingAmount
+  // alongside genuinely-approved-but-not-yet-paid money.
+  const expenditureMatch: Record<string, unknown> = { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch };
   if (filters.beneficiaryType) expenditureMatch.beneficiaryType = filters.beneficiaryType;
   if (filters.beneficiaryId) expenditureMatch.beneficiaryId = new Types.ObjectId(filters.beneficiaryId);
 
@@ -689,7 +693,7 @@ export async function getBeneficiaryPaymentReport(filters: ReportFilters, actor:
       $unionWith: {
         coll: "payrollbatches",
         pipeline: [
-          { $match: { financialYearId: fyObjectId, ...nodeMatch } },
+          { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch } },
           { $unwind: "$employees" },
           ...(filters.beneficiaryType && filters.beneficiaryType !== "EMPLOYEE" ? [{ $match: { _id: null } }] : []),
           ...(filters.beneficiaryId ? [{ $match: { "employees.beneficiaryId": new Types.ObjectId(filters.beneficiaryId) } }] : []),
