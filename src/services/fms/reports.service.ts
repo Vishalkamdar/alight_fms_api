@@ -72,7 +72,13 @@ export async function getBudgetSummaryReport(filters: ReportFilters, actor: Repo
   const budgetSetupRows =
     rootIds.length > 0
       ? await BudgetSetupModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
-          { $match: { financialYearId: fyObjectId, organizationNodeId: { $in: rootIds.map((id) => new Types.ObjectId(id)) } } },
+          {
+            $match: {
+              financialYearId: fyObjectId,
+              approvalStatus: "APPROVED",
+              organizationNodeId: { $in: rootIds.map((id) => new Types.ObjectId(id)) },
+            },
+          },
           { $group: { _id: "$organizationNodeId", amount: { $sum: "$originalAmount" } } },
         ])
       : [];
@@ -80,7 +86,10 @@ export async function getBudgetSummaryReport(filters: ReportFilters, actor: Repo
 
   const rows: BudgetSummaryRow[] = nodeRows.map((row) => {
     const rootId = rootMap.get(row.organizationNodeId) ?? row.organizationNodeId;
-    const totalBudget = budgetByRoot.get(rootId) ?? 0;
+    // Budget Setup is a root-level pool — only the root's own row should
+    // show it, not duplicated onto every department (that also silently
+    // inflated the page's summed "Total Budget" KPI card, once per row).
+    const totalBudget = row.organizationNodeId === rootId ? (budgetByRoot.get(rootId) ?? 0) : 0;
     const used = row.expenditure;
     return {
       organizationNodeId: row.organizationNodeId,

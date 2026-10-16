@@ -68,6 +68,7 @@ export async function getBudgetKpis(
   // them (see `allocated`/`available` below).
   const totalBudget = await sumField(BudgetSetupModel, "originalAmount", {
     financialYearId: fyObjectId,
+    approvalStatus: "APPROVED",
     ...nodeFilter(effectiveNodeIds, "organizationNodeId"),
     ...headMatchSetup,
   });
