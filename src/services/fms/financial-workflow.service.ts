@@ -7,6 +7,7 @@ import {
   operationalRoleForSystemRole,
   resolveGoverningNodeId,
   getDescendantNodeIdsGovernedBy,
+  getTrueDescendantNodeIds,
 } from "../../utils/fms/node-permission";
 import { getUserHeads, getDescendantHeadIdsGovernedBy } from "../../utils/fms/head-permission";
 import { FmsNodeRoleConfigModel } from "../../models/fms/FmsNodeRoleConfig";
@@ -103,7 +104,12 @@ export async function getAllowedNodeIdsForList(actor: ActorForPermission): Promi
   if (!fmsRole) return null;
   const nodes = await getUserNodes(actor.actorId);
   const assignedNodeIds = nodes.filter((node) => node.role === fmsRole).map((node) => node.nodeId);
-  return getDescendantNodeIdsGovernedBy(assignedNodeIds);
+  // Maker authority flows down the real node tree (see hasNodeRole) — the
+  // list/picker scoping must match, or the "new" form would silently accept
+  // a node it never offers as a choice. Verifier/Checker stay governed-only.
+  return fmsRole === "Maker"
+    ? getTrueDescendantNodeIds(assignedNodeIds)
+    : getDescendantNodeIdsGovernedBy(assignedNodeIds);
 }
 
 /**

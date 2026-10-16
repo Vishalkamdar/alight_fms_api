@@ -129,17 +129,94 @@ export async function getDescendantNodeIdsGovernedBy(governingNodeIds: string[])
 }
 
 /**
- * Whether the user may act as `role` on `nodeId` right now — resolved
- * against `nodeId`'s GOVERNING node (itself, or its nearest configured
- * ancestor), not necessarily `nodeId` literally. See resolveGoverningNodeId.
+ * Self + every real ancestor of `nodeId` via parentNodeId, full chain to
+ * root — unlike resolveGoverningNodeId, this never stops at the first
+ * configured node. Used to grant an ancestor-assigned Maker authority over
+ * every descendant, regardless of whether that descendant has its own
+ * FmsNodeRoleConfig (see hasNodeRole).
+ */
+export async function getAncestorNodeIds(nodeId: IdLike): Promise<string[]> {
+  const ancestors: string[] = [];
+  let currentId: string | null = String(nodeId);
+  const visited = new Set<string>();
+
+  while (currentId) {
+    if (visited.has(currentId)) break;
+    visited.add(currentId);
+    ancestors.push(currentId);
+
+    const current: { parentNodeId?: Types.ObjectId | null } | null = await OrganizationNodeModel.findById(
+      currentId
+    )
+      .select("parentNodeId")
+      .lean();
+    currentId = current?.parentNodeId ? String(current.parentNodeId) : null;
+  }
+
+  return ancestors;
+}
+
+/**
+ * Self + every true descendant of the given node ids, via the real
+ * parentNodeId tree — unlike getDescendantNodeIdsGovernedBy, this never
+ * stops at a configured boundary. The inverse of getAncestorNodeIds: used to
+ * widen a Maker's own assigned nodes into everything they may now act on.
+ */
+export async function getTrueDescendantNodeIds(ancestorNodeIds: string[]): Promise<string[]> {
+  if (ancestorNodeIds.length === 0) return [];
+  const ancestorSet = new Set(ancestorNodeIds);
+
+  const allNodes = await OrganizationNodeModel.find({ status: "Active" }).select("_id parentNodeId").lean();
+  const parentById = new Map(allNodes.map((n) => [String(n._id), n.parentNodeId ? String(n.parentNodeId) : null]));
+
+  const descendantCache = new Map<string, boolean>();
+  function isWithin(nodeId: string, visited: Set<string>): boolean {
+    if (ancestorSet.has(nodeId)) return true;
+    if (descendantCache.has(nodeId)) return descendantCache.get(nodeId)!;
+    if (visited.has(nodeId)) return false;
+    visited.add(nodeId);
+
+    const parentId = parentById.get(nodeId) ?? null;
+    const result = parentId ? isWithin(parentId, visited) : false;
+    descendantCache.set(nodeId, result);
+    return result;
+  }
+
+  return allNodes.map((n) => String(n._id)).filter((id) => isWithin(id, new Set()));
+}
+
+/**
+ * Whether the user may act as `role` on `nodeId` right now. Role enablement
+ * is always gated on `nodeId`'s GOVERNING node (itself, or its nearest
+ * configured ancestor — see resolveGoverningNodeId): if the role is
+ * disabled there, nobody can act, full stop.
+ *
+ * Who counts as assigned differs by role: Maker authority flows DOWN a
+ * parent→child chain — an assignment on this node OR any real ancestor
+ * qualifies (getAncestorNodeIds), regardless of whether intervening nodes
+ * have their own FmsNodeRoleConfig. Verifier/Checker stay exact — only an
+ * assignment at the node's own governing node counts, preserving
+ * per-department approval authority even when an ancestor's Maker has
+ * pushed a transaction down into it.
  */
 export async function hasNodeRole(userId: IdLike, nodeId: IdLike, role: FmsRole): Promise<boolean> {
   const governingNodeId = await resolveGoverningNodeId(nodeId);
-  const [assigned, enabled] = await Promise.all([
-    FmsUserNodeRoleModel.exists({ user: userId, node: governingNodeId, role, status: "Active" }),
-    isNodeRoleEnabled(governingNodeId, role),
-  ]);
-  return Boolean(assigned) && enabled;
+  const enabled = await isNodeRoleEnabled(governingNodeId, role);
+  if (!enabled) return false;
+
+  if (role === "Maker") {
+    const ancestorNodeIds = await getAncestorNodeIds(nodeId);
+    const assigned = await FmsUserNodeRoleModel.exists({
+      user: userId,
+      node: { $in: ancestorNodeIds },
+      role: "Maker",
+      status: "Active",
+    });
+    return Boolean(assigned);
+  }
+
+  const assigned = await FmsUserNodeRoleModel.exists({ user: userId, node: governingNodeId, role, status: "Active" });
+  return Boolean(assigned);
 }
 
 export async function hasAnyNodeRole(
