@@ -11,6 +11,7 @@ import {
   returnableAmountQuerySchema,
 } from "../../schemas/fms/fund-transfer.schema";
 import {
+  bulkWorkflowRejectSchema,
   workflowApproveSchema,
   workflowRejectSchema,
   workflowVerifySchema,
@@ -71,12 +72,14 @@ router.get(
 );
 router.post("/pull/bulk-verify", canVerify, validate(bulkFundTransferActionSchema, "body"), controller.bulkVerifyFundTransfers);
 router.post("/pull/bulk-approve", canApprove, validate(bulkFundTransferActionSchema, "body"), controller.bulkApproveFundTransfers);
+router.post("/pull/bulk-reject", canReject, validate(bulkWorkflowRejectSchema, "body"), controller.bulkRejectFundTransfers);
 router.get("/pull/export", canWrite, validate(fundTransferExportQuerySchema, "query"), controller.exportPullTransfers);
 router.get("/pull", canWrite, validate(fundTransferListQuerySchema, "query"), controller.listPullTransfers);
 router.post("/pull", canWrite, validate(createFundTransferSchema, "body"), controller.createPullTransfer);
 
 router.post("/return/bulk-verify", canVerify, validate(bulkFundTransferActionSchema, "body"), controller.bulkVerifyFundTransfers);
 router.post("/return/bulk-approve", canApprove, validate(bulkFundTransferActionSchema, "body"), controller.bulkApproveFundTransfers);
+router.post("/return/bulk-reject", canReject, validate(bulkWorkflowRejectSchema, "body"), controller.bulkRejectFundTransfers);
 router.get("/return/export", canWrite, validate(fundTransferExportQuerySchema, "query"), controller.exportReturnTransfers);
 router.get("/return", canWrite, validate(fundTransferListQuerySchema, "query"), controller.listReturnTransfers);
 router.post("/return", canWrite, validate(createFundTransferSchema, "body"), controller.createReturnTransfer);

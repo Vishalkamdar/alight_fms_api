@@ -14,6 +14,8 @@ export interface FinancialWorkflowHistoryDocument extends Document {
   _id: Types.ObjectId;
   module: FinancialWorkflowModule;
   recordId: Types.ObjectId;
+  /** Only set for a per-employee Payroll action — null for every other module and for whole-batch Payroll actions. */
+  employeeLineId: Types.ObjectId | null;
   action: string;
   userId: Types.ObjectId | null;
   userRole: string | null;
@@ -31,6 +33,7 @@ const financialWorkflowHistorySchema = new Schema<FinancialWorkflowHistoryDocume
   {
     module: { type: String, enum: FINANCIAL_WORKFLOW_MODULES, required: true },
     recordId: { type: Schema.Types.ObjectId, required: true },
+    employeeLineId: { type: Schema.Types.ObjectId, default: null },
     action: { type: String, required: true },
     userId: { type: Schema.Types.ObjectId, ref: "User", default: null },
     userRole: { type: String, default: null },
@@ -46,6 +49,7 @@ const financialWorkflowHistorySchema = new Schema<FinancialWorkflowHistoryDocume
 );
 
 financialWorkflowHistorySchema.index({ module: 1, recordId: 1, createdAt: 1 });
+financialWorkflowHistorySchema.index({ module: 1, recordId: 1, employeeLineId: 1 });
 
 export const FinancialWorkflowHistoryModel = model<FinancialWorkflowHistoryDocument>(
   "FinancialWorkflowHistory",

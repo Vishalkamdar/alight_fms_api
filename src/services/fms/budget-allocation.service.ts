@@ -646,6 +646,14 @@ export async function bulkApproveBudgetAllocations(
   return processBulkWorkflowAction(ids, (id) => approveBudgetAllocation(id, input, context));
 }
 
+export async function bulkRejectBudgetAllocations(
+  ids: string[],
+  input: { reason: string },
+  context: ActorContext
+): Promise<BulkWorkflowResult> {
+  return processBulkWorkflowAction(ids, (id) => rejectBudgetAllocation(id, input, context));
+}
+
 export async function getBudgetAllocationById(
   id: string,
   allowedNodeIds?: string[] | null

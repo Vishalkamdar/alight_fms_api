@@ -11,6 +11,7 @@ import type {
   FundTransferListQuery,
 } from "../../schemas/fms/fund-transfer.schema";
 import type {
+  BulkWorkflowRejectInput,
   WorkflowApproveInput,
   WorkflowRejectInput,
   WorkflowVerifyInput,
@@ -116,6 +117,13 @@ export async function bulkApproveFundTransfers(req: AuthenticatedRequest, res: R
   const context = getActorContextWithRole(req);
   const result = await fundTransferService.bulkApproveFundTransfers(ids, { remarks }, context);
   sendSuccess(res, result, { message: `${result.succeeded.length} approved, ${result.failed.length} failed.` });
+}
+
+export async function bulkRejectFundTransfers(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { ids, reason } = res.locals.body as BulkWorkflowRejectInput;
+  const context = getActorContextWithRole(req);
+  const result = await fundTransferService.bulkRejectFundTransfers(ids, { reason }, context);
+  sendSuccess(res, result, { message: `${result.succeeded.length} rejected, ${result.failed.length} failed.` });
 }
 
 const CSV_HEADER = [

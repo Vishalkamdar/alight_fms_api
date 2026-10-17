@@ -4,11 +4,17 @@ import { authorizeRoles } from "../../middleware/authorize";
 import { validate } from "../../middleware/validate";
 import { objectIdParamsSchema } from "../../schemas/common.schema";
 import {
+  bulkWorkflowIdsSchema,
   createExpenditureSchema,
   expenditureExportQuerySchema,
   expenditureListQuerySchema,
 } from "../../schemas/fms/expenditure.schema";
-import { workflowApproveSchema, workflowRejectSchema, workflowVerifySchema } from "../../schemas/fms/financial-workflow.schema";
+import {
+  bulkWorkflowRejectSchema,
+  workflowApproveSchema,
+  workflowRejectSchema,
+  workflowVerifySchema,
+} from "../../schemas/fms/financial-workflow.schema";
 import * as controller from "../../controllers/fms/expenditure.controller";
 import * as bulkUploadController from "../../controllers/fms/expenditure-bulk-upload.controller";
 
@@ -40,10 +46,21 @@ router.get(
   validate(expenditureListQuerySchema, "query"),
   controller.getMyPendingExpenditures
 );
+router.post("/bulk-verify", canVerify, validate(bulkWorkflowIdsSchema, "body"), controller.bulkVerifyExpenditures);
+router.post("/bulk-approve", canApprove, validate(bulkWorkflowIdsSchema, "body"), controller.bulkApproveExpenditures);
+router.post("/bulk-reject", canReject, validate(bulkWorkflowRejectSchema, "body"), controller.bulkRejectExpenditures);
 
 router.get("/", canWrite, validate(expenditureListQuerySchema, "query"), controller.listExpenditures);
 router.post("/", canWrite, validate(createExpenditureSchema, "body"), controller.createExpenditure);
-router.get("/:id", canWrite, validate(objectIdParamsSchema, "params"), controller.getExpenditure);
+// Read-only — also open to Verifier/Checker, who reach a single
+// Expenditure's detail page by drilling in from Approvals; the service's
+// own allowedNodeIds scoping still restricts which records they can see.
+router.get(
+  "/:id",
+  authorizeRoles("Super Admin", "Admin", "FMS Operational User - Maker", "FMS Operational User - Verifier", "FMS Operational User - Checker"),
+  validate(objectIdParamsSchema, "params"),
+  controller.getExpenditure
+);
 router.post(
   "/:id/documents",
   canWrite,

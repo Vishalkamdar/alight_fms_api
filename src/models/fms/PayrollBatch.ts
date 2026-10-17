@@ -65,6 +65,26 @@ export interface PayrollLine {
   deductions: PayrollDeductionSnapshot[];
   totalDeduction: number;
   netSalary: number;
+
+  // ---- Per-employee approval workflow — each line is independently
+  // verified/approved/rejected; the batch's own approvalStatus is a
+  // maintained rollup over these (see recomputeBatchApprovalRollup in
+  // payroll.service.ts), never written directly once a line acts. holding/
+  // approvedAmount are gross-denominated (salaryAmount), matching how the
+  // batch-level fields always worked — only the actual bank transfer uses
+  // netSalary. ----
+  approvalStatus: ApprovalStatus;
+  verifierId: Types.ObjectId | null;
+  checkerId: Types.ObjectId | null;
+  holdingAmount: number;
+  approvedAmount: number;
+  verifiedAt: Date | null;
+  approvedAt: Date | null;
+  rejectionReason: string | null;
+  rejectedBy: Types.ObjectId | null;
+  rejectedAt: Date | null;
+  sourcePools: PayrollSourcePool[];
+
   paymentStatus: PayrollPaymentStatus;
   paymentReference: string | null;
   bankSnapshot: PayrollBankSnapshot | null;
@@ -93,11 +113,21 @@ export interface PayrollAttachment {
 
 /**
  * One payroll run for a (Financial Year, root Scheme, Organization Node,
- * Month) period — a real parent batch with embedded per-employee lines
- * (§19), unlike Budget Allocation's bulk-create (N independent sibling
- * documents, no shared parent — see that model's own comment). The whole
- * batch is approved/rejected/paid as one unit; only the payment step fans
- * out per employee line, each with its own reference/snapshot/status.
+ * Month) period — a real parent batch with embedded per-employee lines,
+ * unlike Budget Allocation's bulk-create (N independent sibling documents,
+ * no shared parent — see that model's own comment). Each employee line now
+ * carries its own full approve/reject workflow (verified/approved/rejected
+ * independently) — the batch's own `approvalStatus`/`holdingAmount` are a
+ * maintained ROLLUP over the lines, not an independently-set value (see
+ * recomputeBatchApprovalRollup in payroll.service.ts): any line still
+ * pending Verifier keeps the batch at PENDING_VERIFICATION, else any line
+ * still pending Checker keeps it at PENDING_CHECKER_APPROVAL, else APPROVED
+ * if at least one line made it through, else REJECTED_BY_* if every line
+ * was rejected. `hasRejectedLines`/`rejectedLineCount` flag a batch where
+ * not every employee made it through, without needing a new status value
+ * (deliberately not extending the shared ApprovalStatus enum, which 4 other
+ * modules trust to be exhaustive). Payment is triggered per line the moment
+ * that line reaches final approval, not batch-wide.
  */
 export interface PayrollBatchDocument extends Document {
   _id: Types.ObjectId;
@@ -131,7 +161,10 @@ export interface PayrollBatchDocument extends Document {
   rejectionReason: string | null;
   rejectedBy: Types.ObjectId | null;
   rejectedAt: Date | null;
+  /** @deprecated Historical — reservation/release now tracked per-line (see PayrollLine.sourcePools). Kept read-only for batches created before per-employee approval existed. */
   sourcePools: PayrollSourcePool[];
+  hasRejectedLines: boolean;
+  rejectedLineCount: number;
 
   paymentStatus: PayrollPaymentStatus;
 
@@ -166,6 +199,15 @@ const bankSnapshotSchema = new Schema<PayrollBankSnapshot>(
   { _id: false }
 );
 
+const sourcePoolSchema = new Schema<PayrollSourcePool>(
+  {
+    kind: { type: String, enum: ["BUDGET_ALLOCATION", "FUND_TRANSFER"], required: true },
+    poolId: { type: Schema.Types.ObjectId, required: true },
+    amount: { type: Number, required: true, min: 0 },
+  },
+  { _id: false }
+);
+
 const payrollLineSchema = new Schema<PayrollLine>(
   {
     beneficiaryId: { type: Schema.Types.ObjectId, ref: "Beneficiary", required: true },
@@ -182,6 +224,19 @@ const payrollLineSchema = new Schema<PayrollLine>(
     deductions: { type: [deductionSnapshotSchema], default: [] },
     totalDeduction: { type: Number, required: true, default: 0, min: 0 },
     netSalary: { type: Number, required: true, min: 0 },
+
+    approvalStatus: { type: String, enum: APPROVAL_STATUSES, default: "PENDING_VERIFICATION" },
+    verifierId: { type: Schema.Types.ObjectId, ref: "User", default: null },
+    checkerId: { type: Schema.Types.ObjectId, ref: "User", default: null },
+    holdingAmount: { type: Number, required: true, default: 0, min: 0 },
+    approvedAmount: { type: Number, required: true, default: 0, min: 0 },
+    verifiedAt: { type: Date, default: null },
+    approvedAt: { type: Date, default: null },
+    rejectionReason: { type: String, trim: true, maxlength: 1000, default: null },
+    rejectedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
+    rejectedAt: { type: Date, default: null },
+    sourcePools: { type: [sourcePoolSchema], default: [] },
+
     paymentStatus: { type: String, enum: PAYROLL_PAYMENT_STATUSES, default: "PENDING_APPROVAL" },
     paymentReference: { type: String, default: null },
     bankSnapshot: { type: bankSnapshotSchema, default: null },
@@ -190,15 +245,6 @@ const payrollLineSchema = new Schema<PayrollLine>(
     paymentCompletedAt: { type: Date, default: null },
   },
   { _id: true }
-);
-
-const sourcePoolSchema = new Schema<PayrollSourcePool>(
-  {
-    kind: { type: String, enum: ["BUDGET_ALLOCATION", "FUND_TRANSFER"], required: true },
-    poolId: { type: Schema.Types.ObjectId, required: true },
-    amount: { type: Number, required: true, min: 0 },
-  },
-  { _id: false }
 );
 
 const attachmentSchema = new Schema<PayrollAttachment>(
@@ -256,6 +302,8 @@ const payrollBatchSchema = new Schema<PayrollBatchDocument>(
     rejectedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
     rejectedAt: { type: Date, default: null },
     sourcePools: { type: [sourcePoolSchema], required: true, default: [] },
+    hasRejectedLines: { type: Boolean, required: true, default: false },
+    rejectedLineCount: { type: Number, required: true, default: 0, min: 0 },
 
     paymentStatus: { type: String, enum: PAYROLL_PAYMENT_STATUSES, default: "PENDING_APPROVAL" },
 

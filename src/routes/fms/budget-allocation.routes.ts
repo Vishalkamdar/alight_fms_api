@@ -12,6 +12,7 @@ import {
   createBulkBudgetAllocationsSchema,
 } from "../../schemas/fms/budget-allocation.schema";
 import {
+  bulkWorkflowRejectSchema,
   workflowApproveSchema,
   workflowRejectSchema,
   workflowVerifySchema,
@@ -96,6 +97,12 @@ router.post(
   canApprove,
   validate(bulkWorkflowActionSchema, "body"),
   controller.bulkApproveBudgetAllocations
+);
+router.post(
+  "/bulk-reject",
+  canReject,
+  validate(bulkWorkflowRejectSchema, "body"),
+  controller.bulkRejectBudgetAllocations
 );
 router.post(
   "/bulk",

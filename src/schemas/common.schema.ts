@@ -5,3 +5,8 @@ export const objectIdSchema = z.string().regex(/^[a-f0-9]{24}$/i, "Invalid id.")
 export const objectIdParamsSchema = z.object({
   id: objectIdSchema,
 });
+
+export const idAndLineIdParamsSchema = z.object({
+  id: objectIdSchema,
+  lineId: objectIdSchema,
+});

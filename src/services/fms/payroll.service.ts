@@ -7,7 +7,6 @@ import {
   type PayrollBatchDocument,
   type PayrollLine,
   type PayrollDeductionSnapshot,
-  type PayrollSourcePool,
   type PayrollMonth,
 } from "../../models/fms/PayrollBatch";
 import { BeneficiaryModel } from "../../models/fms/Beneficiary";
@@ -91,6 +90,18 @@ export interface PayrollLineDto {
   deductions: PayrollDeductionSnapshot[];
   totalDeduction: number;
   netSalary: number;
+  approvalStatus: ApprovalStatus;
+  verifierId: string | null;
+  verifier: UserRef | null;
+  checkerId: string | null;
+  checker: UserRef | null;
+  holdingAmount: number;
+  approvedAmount: number;
+  verifiedAt: Date | null;
+  approvedAt: Date | null;
+  rejectionReason: string | null;
+  rejectedBy: string | null;
+  rejectedAt: Date | null;
   paymentStatus: string;
   paymentReference: string | null;
   bankSnapshot: { bankName: string; accountHolderName: string; maskedAccountNumber: string; ifscCode: string } | null;
@@ -135,6 +146,8 @@ export interface PayrollBatchDto {
   rejectionReason: string | null;
   rejectedBy: string | null;
   rejectedAt: Date | null;
+  hasRejectedLines: boolean;
+  rejectedLineCount: number;
   paymentStatus: string;
   attachments: Array<{ _id: string; documentInfo: string | null; originalName: string; fileUrl: string; mimeType: string; size: number; uploadedAt: Date }>;
   createdBy: string | null;
@@ -162,7 +175,9 @@ async function buildLookupMaps() {
   };
 }
 
-function serializeLine(line: PayrollLine): PayrollLineDto {
+function serializeLine(line: PayrollLine, userMap: Map<string, UserRef>): PayrollLineDto {
+  const verifierId = line.verifierId ? String(line.verifierId) : null;
+  const checkerId = line.checkerId ? String(line.checkerId) : null;
   return {
     _id: String(line._id),
     beneficiaryId: String(line.beneficiaryId),
@@ -171,6 +186,18 @@ function serializeLine(line: PayrollLine): PayrollLineDto {
     deductions: line.deductions,
     totalDeduction: line.totalDeduction,
     netSalary: line.netSalary,
+    approvalStatus: line.approvalStatus,
+    verifierId,
+    verifier: verifierId ? (userMap.get(verifierId) ?? null) : null,
+    checkerId,
+    checker: checkerId ? (userMap.get(checkerId) ?? null) : null,
+    holdingAmount: line.holdingAmount,
+    approvedAmount: line.approvedAmount,
+    verifiedAt: line.verifiedAt,
+    approvedAt: line.approvedAt,
+    rejectionReason: line.rejectionReason,
+    rejectedBy: line.rejectedBy ? String(line.rejectedBy) : null,
+    rejectedAt: line.rejectedAt,
     paymentStatus: line.paymentStatus,
     paymentReference: line.paymentReference,
     bankSnapshot: line.bankSnapshot
@@ -211,7 +238,7 @@ function serialize(doc: PayrollBatchDocument, maps: Awaited<ReturnType<typeof bu
     remarks: doc.remarks,
     enrichment1: doc.enrichment1,
     enrichment2: doc.enrichment2,
-    employees: doc.employees.map(serializeLine),
+    employees: doc.employees.map((line) => serializeLine(line, maps.userMap)),
     employeeCount: doc.employees.length,
     totalGrossSalary: doc.totalGrossSalary,
     totalDeduction: doc.totalDeduction,
@@ -230,6 +257,8 @@ function serialize(doc: PayrollBatchDocument, maps: Awaited<ReturnType<typeof bu
     rejectionReason: doc.rejectionReason,
     rejectedBy: doc.rejectedBy ? String(doc.rejectedBy) : null,
     rejectedAt: doc.rejectedAt,
+    hasRejectedLines: doc.hasRejectedLines,
+    rejectedLineCount: doc.rejectedLineCount,
     paymentStatus: doc.paymentStatus,
     attachments: doc.attachments.map((a) => ({
       _id: String(a._id),
@@ -362,81 +391,186 @@ async function resolvePayrollLineDeductions(
 }
 
 // ---------------------------------------------------------------------------
-// Payment (§21, §30-32)
+// Per-employee approval rollup + payment (§21, §30-32)
 // ---------------------------------------------------------------------------
 
-function applyFinalApproval(doc: PayrollBatchDocument): void {
-  doc.approvalStatus = "APPROVED";
-  doc.holdingAmount = 0;
-  doc.approvedAmount = doc.totalGrossSalary;
-  doc.approvedAt = new Date();
+/**
+ * The batch's own approvalStatus/holdingAmount/approvedAmount/
+ * hasRejectedLines/rejectedLineCount are a maintained ROLLUP over the
+ * employee lines, recomputed after every line-level action — never set
+ * directly. Precedence: any line still PENDING_VERIFICATION keeps the whole
+ * batch at PENDING_VERIFICATION (so it keeps showing in the Verifier's
+ * queue); else any line still PENDING_CHECKER_APPROVAL keeps it there;
+ * else APPROVED if at least one line made it through; else (every line
+ * terminal, none approved) REJECTED_BY_CHECKER/VERIFIER depending on which
+ * stage the rejections happened at. Deliberately doesn't introduce a new
+ * "partially approved" status value — hasRejectedLines/rejectedLineCount
+ * carry that instead, without touching the shared ApprovalStatus enum 4
+ * other modules trust to be exhaustive.
+ */
+function recomputeBatchRollup(doc: PayrollBatchDocument): void {
+  const lines = doc.employees;
+  const anyPendingVerification = lines.some((l) => l.approvalStatus === "PENDING_VERIFICATION");
+  const anyPendingChecker = lines.some((l) => l.approvalStatus === "PENDING_CHECKER_APPROVAL");
+  const approvedLines = lines.filter((l) => l.approvalStatus === "APPROVED");
+  const rejectedLines = lines.filter((l) => l.approvalStatus === "REJECTED_BY_VERIFIER" || l.approvalStatus === "REJECTED_BY_CHECKER");
+
+  if (anyPendingVerification) {
+    doc.approvalStatus = "PENDING_VERIFICATION";
+  } else if (anyPendingChecker) {
+    doc.approvalStatus = "PENDING_CHECKER_APPROVAL";
+  } else if (approvedLines.length > 0) {
+    doc.approvalStatus = "APPROVED";
+  } else {
+    doc.approvalStatus = rejectedLines.some((l) => l.approvalStatus === "REJECTED_BY_CHECKER")
+      ? "REJECTED_BY_CHECKER"
+      : "REJECTED_BY_VERIFIER";
+  }
+
+  doc.holdingAmount = round2(lines.reduce((sum, l) => sum + l.holdingAmount, 0));
+  doc.approvedAmount = round2(approvedLines.reduce((sum, l) => sum + l.approvedAmount, 0));
+  doc.hasRejectedLines = rejectedLines.length > 0;
+  doc.rejectedLineCount = rejectedLines.length;
+  if (!anyPendingVerification && !anyPendingChecker) doc.approvedAt = doc.approvedAt ?? new Date();
+
+  // Payment status rollup — only ever considers APPROVED lines (§31: a
+  // rejected line's paymentStatus stays PENDING_APPROVAL forever, since
+  // it's never attempted; unscoped `every(...)` would permanently read
+  // PAYMENT_FAILED for any batch with a rejected line).
+  if (approvedLines.length === 0) {
+    doc.paymentStatus = "PENDING_APPROVAL";
+  } else if (approvedLines.every((l) => l.paymentStatus === "PAYMENT_SUCCESS")) {
+    doc.paymentStatus = "PAYMENT_SUCCESS";
+  } else if (approvedLines.some((l) => l.paymentStatus === "PAYMENT_FAILED")) {
+    doc.paymentStatus = "PAYMENT_FAILED";
+  } else {
+    doc.paymentStatus = "PAYMENT_PROCESSING";
+  }
 }
 
 /**
- * Pays every employee line in the batch — each gets its own
- * paymentReference/bankSnapshot/status (§30), re-fetching the beneficiary's
- * CURRENT default bank account at this moment (not whatever it was at
- * submission — §21). The batch's own paymentStatus is derived from the
- * line results afterward: all succeed → PAYMENT_SUCCESS, any fail →
- * PAYMENT_FAILED (§31 — approved never implies paid).
+ * Pays ONE employee line — its own paymentReference/bankSnapshot/status
+ * (§30), re-fetching the beneficiary's CURRENT default bank account at this
+ * moment (not whatever it was at submission — §21). Callable the instant
+ * that line reaches final approval, independent of every other line's
+ * progress.
  */
-async function initiateBatchPayment(doc: PayrollBatchDocument, session: mongoose.ClientSession): Promise<void> {
-  for (const line of doc.employees) {
-    if (line.paymentStatus === "PAYMENT_SUCCESS") continue; // already paid (retry path)
+async function initiateLinePayment(doc: PayrollBatchDocument, line: PayrollLine, session: mongoose.ClientSession): Promise<void> {
+  if (line.paymentStatus === "PAYMENT_SUCCESS") return; // already paid (retry path)
 
-    const beneficiary = await BeneficiaryModel.findById(line.beneficiaryId).session(session);
-    const defaultBank = beneficiary?.bankAccounts.find((b) => b.isDefault) ?? null;
-    if (!beneficiary || !defaultBank) {
-      line.paymentStatus = "PAYMENT_FAILED";
-      line.paymentFailureReason = "Beneficiary has no Default Bank Account at payment time.";
-      continue;
-    }
-
-    line.bankSnapshot = {
-      bankName: defaultBank.bankName,
-      accountHolderName: defaultBank.accountHolderName,
-      maskedAccountNumber: maskAccountNumber(defaultBank.accountNumber),
-      ifscCode: defaultBank.ifscCode,
-      beneficiaryId: beneficiary._id,
-    };
-    line.paymentReference = line.paymentReference ?? generatePaymentReference();
-    line.paymentStatus = "PAYMENT_PROCESSING";
-    line.paymentInitiatedAt = new Date();
-
-    // eslint-disable-next-line no-await-in-loop
-    const result = await paymentTransferProvider.transfer({
-      expenditureId: String(doc._id),
-      amount: line.netSalary,
-      paymentReference: line.paymentReference,
-      bankSnapshot: {
-        bankName: line.bankSnapshot.bankName,
-        accountHolderName: line.bankSnapshot.accountHolderName,
-        maskedAccountNumber: line.bankSnapshot.maskedAccountNumber,
-        ifscCode: line.bankSnapshot.ifscCode,
-      },
-    });
-
-    if (result.status === "SUCCESS") {
-      line.paymentStatus = "PAYMENT_SUCCESS";
-      line.paymentCompletedAt = new Date();
-      line.paymentFailureReason = null;
-    } else {
-      line.paymentStatus = "PAYMENT_FAILED";
-      line.paymentFailureReason = result.failureReason ?? "Payment transfer failed.";
-    }
+  const beneficiary = await BeneficiaryModel.findById(line.beneficiaryId).session(session);
+  const defaultBank = beneficiary?.bankAccounts.find((b) => b.isDefault) ?? null;
+  if (!beneficiary || !defaultBank) {
+    line.paymentStatus = "PAYMENT_FAILED";
+    line.paymentFailureReason = "Beneficiary has no Default Bank Account at payment time.";
+    return;
   }
 
-  doc.paymentStatus = doc.employees.every((e) => e.paymentStatus === "PAYMENT_SUCCESS") ? "PAYMENT_SUCCESS" : "PAYMENT_FAILED";
+  line.bankSnapshot = {
+    bankName: defaultBank.bankName,
+    accountHolderName: defaultBank.accountHolderName,
+    maskedAccountNumber: maskAccountNumber(defaultBank.accountNumber),
+    ifscCode: defaultBank.ifscCode,
+    beneficiaryId: beneficiary._id,
+  };
+  line.paymentReference = line.paymentReference ?? generatePaymentReference();
+  line.paymentStatus = "PAYMENT_PROCESSING";
+  line.paymentInitiatedAt = new Date();
+
+  const result = await paymentTransferProvider.transfer({
+    expenditureId: String(doc._id),
+    amount: line.netSalary,
+    paymentReference: line.paymentReference,
+    bankSnapshot: {
+      bankName: line.bankSnapshot.bankName,
+      accountHolderName: line.bankSnapshot.accountHolderName,
+      maskedAccountNumber: line.bankSnapshot.maskedAccountNumber,
+      ifscCode: line.bankSnapshot.ifscCode,
+    },
+  });
+
+  if (result.status === "SUCCESS") {
+    line.paymentStatus = "PAYMENT_SUCCESS";
+    line.paymentCompletedAt = new Date();
+    line.paymentFailureReason = null;
+  } else {
+    line.paymentStatus = "PAYMENT_FAILED";
+    line.paymentFailureReason = result.failureReason ?? "Payment transfer failed.";
+  }
+}
+
+/** Pays every one of the given lines (defaults to every APPROVED line in the batch), then refreshes the batch's payment rollup. */
+async function initiateBatchPayment(doc: PayrollBatchDocument, session: mongoose.ClientSession, lines?: PayrollLine[]): Promise<void> {
+  const targets = lines ?? doc.employees.filter((l) => l.approvalStatus === "APPROVED");
+  for (const line of targets) {
+    // eslint-disable-next-line no-await-in-loop
+    await initiateLinePayment(doc, line, session);
+  }
+  recomputeBatchRollup(doc);
+}
+
+// ---------------------------------------------------------------------------
+// Per-line verify/approve/reject mutations — shared by the single-employee
+// endpoints and by the whole-batch endpoints, which loop every line
+// currently eligible for the actor's stage through the same mechanics.
+// ---------------------------------------------------------------------------
+
+function applyLineVerification(
+  doc: PayrollBatchDocument,
+  line: PayrollLine,
+  actorId: Types.ObjectId
+): { previousStatus: ApprovalStatus; nextStatus: ApprovalStatus; isFinal: boolean } {
+  const { nextStatus, isFinal } = computeVerifyTransition(doc.workflowSnapshot);
+  const previousStatus = line.approvalStatus;
+  line.verifierId = actorId;
+  line.verifiedAt = new Date();
+  line.approvalStatus = nextStatus;
+  if (isFinal) {
+    line.approvedAt = new Date();
+    line.approvedAmount = line.holdingAmount;
+    line.holdingAmount = 0;
+  }
+  return { previousStatus, nextStatus, isFinal };
+}
+
+function applyLineApproval(line: PayrollLine, actorId: Types.ObjectId): ApprovalStatus {
+  const previousStatus = line.approvalStatus;
+  line.checkerId = actorId;
+  line.approvalStatus = "APPROVED";
+  line.approvedAt = new Date();
+  line.approvedAmount = line.holdingAmount;
+  line.holdingAmount = 0;
+  return previousStatus;
+}
+
+/** Releases only THIS line's own reservations back to their parent pool(s) — an approved/pending sibling line's reservation is untouched. */
+async function applyLineRejection(
+  line: PayrollLine,
+  actorId: Types.ObjectId,
+  reason: string,
+  isVerifierStage: boolean,
+  session: mongoose.ClientSession
+): Promise<ApprovalStatus> {
+  await releaseToParentPool(line.sourcePools, session);
+  const previousStatus = line.approvalStatus;
+  line.approvalStatus = isVerifierStage ? "REJECTED_BY_VERIFIER" : "REJECTED_BY_CHECKER";
+  line.rejectionReason = reason;
+  line.rejectedBy = actorId;
+  line.rejectedAt = new Date();
+  line.holdingAmount = 0;
+  if (isVerifierStage) line.verifierId = actorId;
+  else line.checkerId = actorId;
+  return previousStatus;
 }
 
 export async function retryPayrollPayment(id: string, employeeLineId: string | undefined, context: ActorContext): Promise<PayrollBatchDto> {
   const actorId = requireActorId(context);
   const doc = await PayrollBatchModel.findById(id);
   if (!doc) throw new AppError(404, "Payroll batch not found.");
-  if (doc.approvalStatus !== "APPROVED") throw new AppError(422, "This Payroll batch has not been approved yet.");
 
-  const linesToRetry = employeeLineId ? doc.employees.filter((e) => String(e._id) === employeeLineId) : doc.employees;
-  if (linesToRetry.length === 0) throw new AppError(404, "Employee payroll line not found.");
+  const approvedLines = doc.employees.filter((e) => e.approvalStatus === "APPROVED");
+  const linesToRetry = employeeLineId ? approvedLines.filter((e) => String(e._id) === employeeLineId) : approvedLines;
+  if (linesToRetry.length === 0) throw new AppError(404, "Employee payroll line not found or not yet approved.");
   if (!linesToRetry.some((e) => e.paymentStatus === "PAYMENT_FAILED")) {
     throw new AppError(422, "No failed payment to retry for the given selection.");
   }
@@ -444,7 +578,7 @@ export async function retryPayrollPayment(id: string, employeeLineId: string | u
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
-      await initiateBatchPayment(doc, session);
+      await initiateBatchPayment(doc, session, linesToRetry);
       doc.updatedBy = actorId;
       await doc.save({ session });
     });
@@ -518,16 +652,31 @@ export async function createPayrollBatch(input: CreatePayrollBatchInput, context
 
   const session = await mongoose.startSession();
   let created: PayrollBatchDocument;
-  let sourcePools: PayrollSourcePool[];
   try {
-    const result = await session.withTransaction(async () => {
-      const reservations: ReceivedPoolReservation[] = await reserveFromNodeOwnReceivedPool(
-        String(scope.organizationNodeId),
-        totalGrossSalary,
-        scope,
-        session
-      );
-      const pools: PayrollSourcePool[] = reservations.map((r) => ({ kind: r.kind, poolId: r.poolId, amount: r.amount }));
+    created = await session.withTransaction(async () => {
+      // Reserve per employee line (not once for the combined total) — same
+      // pools, same sequential order, inside the same transaction, so the
+      // total reserved is identical to today, just split into N records so
+      // a later per-line reject can release only that employee's share.
+      for (const line of lines) {
+        const reservations: ReceivedPoolReservation[] = await reserveFromNodeOwnReceivedPool(
+          String(scope.organizationNodeId),
+          line.salaryAmount,
+          scope,
+          session
+        );
+        line.sourcePools = reservations.map((r) => ({ kind: r.kind, poolId: r.poolId, amount: r.amount }));
+        line.approvalStatus = workflow.initialStatus;
+        line.verifierId = null;
+        line.checkerId = null;
+        line.verifiedAt = null;
+        line.approvedAt = autoApproved ? new Date() : null;
+        line.holdingAmount = autoApproved ? 0 : line.salaryAmount;
+        line.approvedAmount = autoApproved ? line.salaryAmount : 0;
+        line.rejectionReason = null;
+        line.rejectedBy = null;
+        line.rejectedAt = null;
+      }
 
       const [doc] = await PayrollBatchModel.create(
         [
@@ -551,7 +700,8 @@ export async function createPayrollBatch(input: CreatePayrollBatchInput, context
             holdingAmount: autoApproved ? 0 : totalGrossSalary,
             approvedAmount: autoApproved ? totalGrossSalary : 0,
             approvedAt: autoApproved ? new Date() : null,
-            sourcePools: pools,
+            hasRejectedLines: false,
+            rejectedLineCount: 0,
             paymentStatus: "PENDING_APPROVAL",
             createdBy: actorId,
             updatedBy: actorId,
@@ -567,24 +717,22 @@ export async function createPayrollBatch(input: CreatePayrollBatchInput, context
       );
 
       if (autoApproved) {
-        applyFinalApproval(doc);
         await initiateBatchPayment(doc, session);
         await doc.save({ session });
       }
 
-      return { doc, pools };
+      return doc;
     });
-    created = result.doc;
-    sourcePools = result.pools;
   } finally {
     await session.endSession();
   }
 
+  const totalPoolCount = lines.reduce((sum, l) => sum + l.sourcePools.length, 0);
   await logActivity({
     user: actorId,
     action: "PAYROLL_CREATED",
     module: "FINANCE",
-    description: `Maker created Payroll batch ${created.payrollNumber} for ${input.month} with ${lines.length} employee(s), total ${totalGrossSalary} — drawn from ${sourcePools.length} pool(s), ${created.approvalStatus}.`,
+    description: `Maker created Payroll batch ${created.payrollNumber} for ${input.month} with ${lines.length} employee(s), total ${totalGrossSalary} — drawn from ${totalPoolCount} pool(s) across ${lines.length} employee line(s), ${created.approvalStatus}.`,
     entityType: "PayrollBatch",
     entityId: created._id,
     ipAddress: context.ipAddress,
@@ -607,6 +755,13 @@ export async function createPayrollBatch(input: CreatePayrollBatchInput, context
   return serialize(created, maps);
 }
 
+/**
+ * Loops every line currently at the Verifier stage through the same
+ * mechanics as verifyPayrollLine — identical observable behavior to the
+ * old whole-batch-only implementation when every line shares a stage (the
+ * common case), and well-defined for a batch some of whose lines have
+ * already progressed further (those are simply left untouched).
+ */
 export async function verifyPayrollBatch(id: string, input: { remarks?: string }, context: ActorContext): Promise<PayrollBatchDto> {
   const doc = await PayrollBatchModel.findById(id);
   if (!doc) throw new AppError(404, "Payroll batch not found.");
@@ -614,27 +769,200 @@ export async function verifyPayrollBatch(id: string, input: { remarks?: string }
   if (doc.approvalStatus !== "PENDING_VERIFICATION") throw new AppError(422, "This Payroll batch is not pending verification.");
 
   const actorId = requireActorId(context);
-  assertNotSelfApproving({ makerId: doc.makerId, verifierId: doc.verifierId, checkerId: doc.checkerId, workflowSnapshot: doc.workflowSnapshot }, actorId);
+  assertNotSelfApproving({ makerId: doc.makerId, verifierId: null, checkerId: null, workflowSnapshot: doc.workflowSnapshot }, actorId);
   await assertVerifierPermission({ actorId, actorRole: requireActorRole(context) }, String(doc.organizationNodeId));
 
-  const { nextStatus, isFinal } = computeVerifyTransition(doc.workflowSnapshot);
-  const previousStatus = doc.approvalStatus;
-  doc.verifierId = actorId;
-  doc.verifiedAt = new Date();
-  doc.approvalStatus = nextStatus;
-  doc.updatedBy = actorId;
-
+  const eligibleLines = doc.employees.filter((l) => l.approvalStatus === "PENDING_VERIFICATION");
+  let finalCount = 0;
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
-      if (isFinal) {
-        applyFinalApproval(doc);
-        await initiateBatchPayment(doc, session);
+      for (const line of eligibleLines) {
+        const applied = applyLineVerification(doc, line, actorId);
+        if (applied.isFinal) {
+          finalCount += 1;
+          // eslint-disable-next-line no-await-in-loop
+          await initiateLinePayment(doc, line, session);
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await recordWorkflowEvent(
+          { module: "PAYROLL", recordId: doc._id, employeeLineId: line._id, organizationNodeId: doc.organizationNodeId, amount: line.salaryAmount },
+          { action: "VERIFIER_VERIFIED", userId: actorId, userRole: "Verifier", previousStatus: applied.previousStatus, newStatus: line.approvalStatus, holdingAmount: line.holdingAmount, remarks: input.remarks, ipAddress: context.ipAddress },
+          session
+        );
       }
+      recomputeBatchRollup(doc);
+      doc.updatedBy = actorId;
+      await doc.save({ session });
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  await logActivity({
+    user: actorId,
+    action: "PAYROLL_VERIFIED",
+    module: "FINANCE",
+    description: `Verifier verified ${eligibleLines.length} employee line(s) in Payroll batch ${doc.payrollNumber}${finalCount > 0 ? ` — ${finalCount} reached final approval, payment ${doc.paymentStatus}.` : "."}`,
+    entityType: "PayrollBatch",
+    entityId: doc._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
+  const maps = await buildLookupMaps();
+  return serialize(doc, maps);
+}
+
+/** Loops every line currently at the Checker stage through the same mechanics as approvePayrollLine. */
+export async function approvePayrollBatch(id: string, input: { remarks?: string }, context: ActorContext): Promise<PayrollBatchDto> {
+  const doc = await PayrollBatchModel.findById(id);
+  if (!doc) throw new AppError(404, "Payroll batch not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
+  if (doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") throw new AppError(422, "This Payroll batch is not pending Checker approval.");
+
+  const actorId = requireActorId(context);
+  assertNotSelfApproving({ makerId: doc.makerId, verifierId: null, checkerId: null, workflowSnapshot: doc.workflowSnapshot }, actorId);
+  await assertCheckerPermission({ actorId, actorRole: requireActorRole(context) }, String(doc.organizationNodeId));
+
+  const eligibleLines = doc.employees.filter((l) => l.approvalStatus === "PENDING_CHECKER_APPROVAL");
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      for (const line of eligibleLines) {
+        const previousStatus = applyLineApproval(line, actorId);
+        // eslint-disable-next-line no-await-in-loop
+        await initiateLinePayment(doc, line, session);
+        // eslint-disable-next-line no-await-in-loop
+        await recordWorkflowEvent(
+          { module: "PAYROLL", recordId: doc._id, employeeLineId: line._id, organizationNodeId: doc.organizationNodeId, amount: line.salaryAmount },
+          { action: "CHECKER_APPROVED", userId: actorId, userRole: "Checker", previousStatus, newStatus: "APPROVED", holdingAmount: 0, remarks: input.remarks, ipAddress: context.ipAddress },
+          session
+        );
+      }
+      recomputeBatchRollup(doc);
+      doc.updatedBy = actorId;
+      await doc.save({ session });
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  await logActivity({
+    user: actorId,
+    action: "PAYROLL_FINAL_APPROVED",
+    module: "FINANCE",
+    description: `Checker approved ${eligibleLines.length} employee line(s) in Payroll batch ${doc.payrollNumber} — final approval, payment ${doc.paymentStatus}.`,
+    entityType: "PayrollBatch",
+    entityId: doc._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
+  const maps = await buildLookupMaps();
+  return serialize(doc, maps);
+}
+
+/** Loops every line currently eligible for the actor's stage through the same mechanics as rejectPayrollLine. */
+export async function rejectPayrollBatch(id: string, input: { reason: string }, context: ActorContext): Promise<PayrollBatchDto> {
+  const doc = await PayrollBatchModel.findById(id);
+  if (!doc) throw new AppError(404, "Payroll batch not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
+  if (doc.approvalStatus !== "PENDING_VERIFICATION" && doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
+    throw new AppError(422, "This Payroll batch is not pending any approval.");
+  }
+  const actorId = requireActorId(context);
+  assertNotSelfApproving({ makerId: doc.makerId, verifierId: null, checkerId: null, workflowSnapshot: doc.workflowSnapshot }, actorId);
+
+  const isVerifierStage = doc.approvalStatus === "PENDING_VERIFICATION";
+  if (isVerifierStage) {
+    await assertVerifierPermission({ actorId, actorRole: requireActorRole(context) }, String(doc.organizationNodeId));
+  } else {
+    await assertCheckerPermission({ actorId, actorRole: requireActorRole(context) }, String(doc.organizationNodeId));
+  }
+
+  const stageStatus: ApprovalStatus = isVerifierStage ? "PENDING_VERIFICATION" : "PENDING_CHECKER_APPROVAL";
+  const eligibleLines = doc.employees.filter((l) => l.approvalStatus === stageStatus);
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      for (const line of eligibleLines) {
+        // eslint-disable-next-line no-await-in-loop
+        const previousStatus = await applyLineRejection(line, actorId, input.reason, isVerifierStage, session);
+        // eslint-disable-next-line no-await-in-loop
+        await recordWorkflowEvent(
+          { module: "PAYROLL", recordId: doc._id, employeeLineId: line._id, organizationNodeId: doc.organizationNodeId, amount: line.salaryAmount },
+          {
+            action: isVerifierStage ? "VERIFIER_REJECTED" : "CHECKER_REJECTED",
+            userId: actorId,
+            userRole: isVerifierStage ? "Verifier" : "Checker",
+            previousStatus,
+            newStatus: line.approvalStatus,
+            holdingAmount: 0,
+            remarks: input.reason,
+            ipAddress: context.ipAddress,
+          },
+          session
+        );
+      }
+      recomputeBatchRollup(doc);
+      doc.updatedBy = actorId;
+      await doc.save({ session });
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  await logActivity({
+    user: actorId,
+    action: isVerifierStage ? "PAYROLL_REJECTED_BY_VERIFIER" : "PAYROLL_REJECTED_BY_CHECKER",
+    module: "FINANCE",
+    description: `${isVerifierStage ? "Verifier" : "Checker"} rejected ${eligibleLines.length} employee line(s) in Payroll batch ${doc.payrollNumber}: ${input.reason} — Holding released.`,
+    entityType: "PayrollBatch",
+    entityId: doc._id,
+    ipAddress: context.ipAddress,
+    userAgent: context.userAgent,
+  });
+
+  const maps = await buildLookupMaps();
+  return serialize(doc, maps);
+}
+
+// ---------------------------------------------------------------------------
+// Per-employee verify/approve/reject — act on one employee line within a
+// batch independently of every other line's progress.
+// ---------------------------------------------------------------------------
+
+function findPayrollLine(doc: PayrollBatchDocument, lineId: string): PayrollLine {
+  const line = doc.employees.find((e) => String(e._id) === lineId);
+  if (!line) throw new AppError(404, "Employee payroll line not found.");
+  return line;
+}
+
+export async function verifyPayrollLine(batchId: string, lineId: string, input: { remarks?: string }, context: ActorContext): Promise<PayrollBatchDto> {
+  const doc = await PayrollBatchModel.findById(batchId);
+  if (!doc) throw new AppError(404, "Payroll batch not found.");
+  await assertFinancialYearIsWritable(doc.financialYearId);
+  const line = findPayrollLine(doc, lineId);
+  if (line.approvalStatus !== "PENDING_VERIFICATION") throw new AppError(422, "This employee's payroll is not pending verification.");
+
+  const actorId = requireActorId(context);
+  assertNotSelfApproving({ makerId: doc.makerId, verifierId: line.verifierId, checkerId: line.checkerId, workflowSnapshot: doc.workflowSnapshot }, actorId);
+  await assertVerifierPermission({ actorId, actorRole: requireActorRole(context) }, String(doc.organizationNodeId));
+
+  let isFinal = false;
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const applied = applyLineVerification(doc, line, actorId);
+      isFinal = applied.isFinal;
+      if (isFinal) await initiateLinePayment(doc, line, session);
+      recomputeBatchRollup(doc);
+      doc.updatedBy = actorId;
       await doc.save({ session });
       await recordWorkflowEvent(
-        { module: "PAYROLL", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.totalGrossSalary },
-        { action: "VERIFIER_VERIFIED", userId: actorId, userRole: "Verifier", previousStatus, newStatus: nextStatus, holdingAmount: doc.holdingAmount, remarks: input.remarks, ipAddress: context.ipAddress },
+        { module: "PAYROLL", recordId: doc._id, employeeLineId: line._id, organizationNodeId: doc.organizationNodeId, amount: line.salaryAmount },
+        { action: "VERIFIER_VERIFIED", userId: actorId, userRole: "Verifier", previousStatus: applied.previousStatus, newStatus: line.approvalStatus, holdingAmount: line.holdingAmount, remarks: input.remarks, ipAddress: context.ipAddress },
         session
       );
     });
@@ -646,7 +974,7 @@ export async function verifyPayrollBatch(id: string, input: { remarks?: string }
     user: actorId,
     action: "PAYROLL_VERIFIED",
     module: "FINANCE",
-    description: `Verifier verified Payroll batch ${doc.payrollNumber}${isFinal ? ` — final approval, payment ${doc.paymentStatus}.` : "."}`,
+    description: `Verifier verified ${line.beneficiarySnapshot.name}'s payroll line in batch ${doc.payrollNumber}${isFinal ? ` — final approval, payment ${line.paymentStatus}.` : "."}`,
     entityType: "PayrollBatch",
     entityId: doc._id,
     ipAddress: context.ipAddress,
@@ -657,28 +985,27 @@ export async function verifyPayrollBatch(id: string, input: { remarks?: string }
   return serialize(doc, maps);
 }
 
-export async function approvePayrollBatch(id: string, input: { remarks?: string }, context: ActorContext): Promise<PayrollBatchDto> {
-  const doc = await PayrollBatchModel.findById(id);
+export async function approvePayrollLine(batchId: string, lineId: string, input: { remarks?: string }, context: ActorContext): Promise<PayrollBatchDto> {
+  const doc = await PayrollBatchModel.findById(batchId);
   if (!doc) throw new AppError(404, "Payroll batch not found.");
   await assertFinancialYearIsWritable(doc.financialYearId);
-  if (doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") throw new AppError(422, "This Payroll batch is not pending Checker approval.");
+  const line = findPayrollLine(doc, lineId);
+  if (line.approvalStatus !== "PENDING_CHECKER_APPROVAL") throw new AppError(422, "This employee's payroll is not pending Checker approval.");
 
   const actorId = requireActorId(context);
-  assertNotSelfApproving({ makerId: doc.makerId, verifierId: doc.verifierId, checkerId: doc.checkerId, workflowSnapshot: doc.workflowSnapshot }, actorId);
+  assertNotSelfApproving({ makerId: doc.makerId, verifierId: line.verifierId, checkerId: line.checkerId, workflowSnapshot: doc.workflowSnapshot }, actorId);
   await assertCheckerPermission({ actorId, actorRole: requireActorRole(context) }, String(doc.organizationNodeId));
-
-  const previousStatus = doc.approvalStatus;
-  doc.checkerId = actorId;
-  doc.updatedBy = actorId;
 
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
-      applyFinalApproval(doc);
-      await initiateBatchPayment(doc, session);
+      const previousStatus = applyLineApproval(line, actorId);
+      await initiateLinePayment(doc, line, session);
+      recomputeBatchRollup(doc);
+      doc.updatedBy = actorId;
       await doc.save({ session });
       await recordWorkflowEvent(
-        { module: "PAYROLL", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.totalGrossSalary },
+        { module: "PAYROLL", recordId: doc._id, employeeLineId: line._id, organizationNodeId: doc.organizationNodeId, amount: line.salaryAmount },
         { action: "CHECKER_APPROVED", userId: actorId, userRole: "Checker", previousStatus, newStatus: "APPROVED", holdingAmount: 0, remarks: input.remarks, ipAddress: context.ipAddress },
         session
       );
@@ -691,7 +1018,7 @@ export async function approvePayrollBatch(id: string, input: { remarks?: string 
     user: actorId,
     action: "PAYROLL_FINAL_APPROVED",
     module: "FINANCE",
-    description: `Checker approved Payroll batch ${doc.payrollNumber} — final approval, payment ${doc.paymentStatus}.`,
+    description: `Checker approved ${line.beneficiarySnapshot.name}'s payroll line in batch ${doc.payrollNumber} — final approval, payment ${line.paymentStatus}.`,
     entityType: "PayrollBatch",
     entityId: doc._id,
     ipAddress: context.ipAddress,
@@ -702,46 +1029,40 @@ export async function approvePayrollBatch(id: string, input: { remarks?: string 
   return serialize(doc, maps);
 }
 
-export async function rejectPayrollBatch(id: string, input: { reason: string }, context: ActorContext): Promise<PayrollBatchDto> {
-  const doc = await PayrollBatchModel.findById(id);
+export async function rejectPayrollLine(batchId: string, lineId: string, input: { reason: string }, context: ActorContext): Promise<PayrollBatchDto> {
+  const doc = await PayrollBatchModel.findById(batchId);
   if (!doc) throw new AppError(404, "Payroll batch not found.");
   await assertFinancialYearIsWritable(doc.financialYearId);
-  if (doc.approvalStatus !== "PENDING_VERIFICATION" && doc.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
-    throw new AppError(422, "This Payroll batch is not pending any approval.");
+  const line = findPayrollLine(doc, lineId);
+  if (line.approvalStatus !== "PENDING_VERIFICATION" && line.approvalStatus !== "PENDING_CHECKER_APPROVAL") {
+    throw new AppError(422, "This employee's payroll is not pending any approval.");
   }
-  const actorId = requireActorId(context);
-  assertNotSelfApproving({ makerId: doc.makerId, verifierId: doc.verifierId, checkerId: doc.checkerId, workflowSnapshot: doc.workflowSnapshot }, actorId);
 
-  const isVerifierStage = doc.approvalStatus === "PENDING_VERIFICATION";
+  const actorId = requireActorId(context);
+  assertNotSelfApproving({ makerId: doc.makerId, verifierId: line.verifierId, checkerId: line.checkerId, workflowSnapshot: doc.workflowSnapshot }, actorId);
+
+  const isVerifierStage = line.approvalStatus === "PENDING_VERIFICATION";
   if (isVerifierStage) {
     await assertVerifierPermission({ actorId, actorRole: requireActorRole(context) }, String(doc.organizationNodeId));
   } else {
     await assertCheckerPermission({ actorId, actorRole: requireActorRole(context) }, String(doc.organizationNodeId));
   }
 
-  const previousStatus = doc.approvalStatus;
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
-      await releaseToParentPool(doc.sourcePools, session);
-      doc.approvalStatus = isVerifierStage ? "REJECTED_BY_VERIFIER" : "REJECTED_BY_CHECKER";
-      doc.rejectionReason = input.reason;
-      doc.rejectedBy = actorId;
-      doc.rejectedAt = new Date();
-      doc.holdingAmount = 0;
-      if (isVerifierStage) doc.verifierId = actorId;
-      else doc.checkerId = actorId;
+      const previousStatus = await applyLineRejection(line, actorId, input.reason, isVerifierStage, session);
+      recomputeBatchRollup(doc);
       doc.updatedBy = actorId;
       await doc.save({ session });
-
       await recordWorkflowEvent(
-        { module: "PAYROLL", recordId: doc._id, organizationNodeId: doc.organizationNodeId, amount: doc.totalGrossSalary },
+        { module: "PAYROLL", recordId: doc._id, employeeLineId: line._id, organizationNodeId: doc.organizationNodeId, amount: line.salaryAmount },
         {
           action: isVerifierStage ? "VERIFIER_REJECTED" : "CHECKER_REJECTED",
           userId: actorId,
           userRole: isVerifierStage ? "Verifier" : "Checker",
           previousStatus,
-          newStatus: doc.approvalStatus,
+          newStatus: line.approvalStatus,
           holdingAmount: 0,
           remarks: input.reason,
           ipAddress: context.ipAddress,
@@ -757,7 +1078,7 @@ export async function rejectPayrollBatch(id: string, input: { reason: string }, 
     user: actorId,
     action: isVerifierStage ? "PAYROLL_REJECTED_BY_VERIFIER" : "PAYROLL_REJECTED_BY_CHECKER",
     module: "FINANCE",
-    description: `${isVerifierStage ? "Verifier" : "Checker"} rejected Payroll batch ${doc.payrollNumber}: ${input.reason} — Holding released.`,
+    description: `${isVerifierStage ? "Verifier" : "Checker"} rejected ${line.beneficiarySnapshot.name}'s payroll line in batch ${doc.payrollNumber}: ${input.reason} — Holding released.`,
     entityType: "PayrollBatch",
     entityId: doc._id,
     ipAddress: context.ipAddress,
@@ -796,6 +1117,9 @@ export async function bulkVerifyPayrollBatches(ids: string[], input: { remarks?:
 }
 export async function bulkApprovePayrollBatches(ids: string[], input: { remarks?: string }, context: ActorContext): Promise<BulkWorkflowResult> {
   return processBulkWorkflowAction(ids, (id) => approvePayrollBatch(id, input, context));
+}
+export async function bulkRejectPayrollBatches(ids: string[], input: { reason: string }, context: ActorContext): Promise<BulkWorkflowResult> {
+  return processBulkWorkflowAction(ids, (id) => rejectPayrollBatch(id, input, context));
 }
 
 // ---------------------------------------------------------------------------
@@ -883,8 +1207,27 @@ export async function listPendingPayrollApprovalsForStage(
     return { items: [], meta: { page: query.page, limit: query.limit, total: 0, totalPages: 1 } };
   }
 
+  // Matched against each employee LINE's own approvalStatus, not the
+  // batch-level rollup — a batch with some lines still at Verifier stage
+  // and others already at Checker stage rolls up to PENDING_VERIFICATION
+  // (the earliest stage wins), which would otherwise hide it from the
+  // Checker's queue until every other line also clears Verifier.
   const forcedStatus: ApprovalStatus = stage === "Verifier" ? "PENDING_VERIFICATION" : "PENDING_CHECKER_APPROVAL";
-  return listPayrollBatches({ ...query, approvalStatus: forcedStatus }, allowedNodeIds);
+  const match = buildListMatch({ ...query, approvalStatus: undefined }, allowedNodeIds);
+  match.employees = { $elemMatch: { approvalStatus: forcedStatus } };
+
+  const [docs, total] = await Promise.all([
+    PayrollBatchModel.find(match)
+      .sort({ [query.sortBy]: query.sortOrder === "asc" ? 1 : -1 })
+      .skip((query.page - 1) * query.limit)
+      .limit(query.limit),
+    PayrollBatchModel.countDocuments(match),
+  ]);
+  const maps = await buildLookupMaps();
+  return {
+    items: docs.map((doc) => serialize(doc, maps)),
+    meta: { page: query.page, limit: query.limit, total, totalPages: Math.max(Math.ceil(total / query.limit), 1) },
+  };
 }
 
 export function getAllowedNodeIdsForPayroll(actor: ActorForPermission) {

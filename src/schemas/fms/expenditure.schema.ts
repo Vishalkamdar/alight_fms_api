@@ -111,7 +111,13 @@ export const expenditureListQuerySchema = z.object({
 
 export const expenditureExportQuerySchema = expenditureListQuerySchema.omit({ page: true, limit: true });
 
+export const bulkWorkflowIdsSchema = z.object({
+  ids: z.array(objectIdSchema).min(1).max(200),
+  remarks: z.string().trim().max(1000).optional(),
+});
+
 export type CreateExpenditureInput = z.infer<typeof createExpenditureSchema>;
 export type UpdateExpenditureInput = z.infer<typeof updateExpenditureSchema>;
 export type ExpenditureListQuery = z.infer<typeof expenditureListQuerySchema>;
 export type ExpenditureExportQuery = z.infer<typeof expenditureExportQuerySchema>;
+export type BulkWorkflowIdsInput = z.infer<typeof bulkWorkflowIdsSchema>;

@@ -8,10 +8,12 @@ import { getAllowedNodeIdsForList } from "../../services/fms/financial-workflow.
 import * as expenditureService from "../../services/fms/expenditure.service";
 import type { AuthenticatedRequest } from "../../middleware/auth";
 import type {
+  BulkWorkflowIdsInput,
   CreateExpenditureInput,
   ExpenditureExportQuery,
   ExpenditureListQuery,
 } from "../../schemas/fms/expenditure.schema";
+import type { BulkWorkflowRejectInput } from "../../schemas/fms/financial-workflow.schema";
 
 export async function listExpenditures(req: AuthenticatedRequest, res: Response): Promise<void> {
   const query = res.locals.query as ExpenditureListQuery;
@@ -27,6 +29,27 @@ export async function getExpenditure(req: AuthenticatedRequest, res: Response): 
   const allowedNodeIds = await getAllowedNodeIdsForList(context);
   const expenditure = await expenditureService.getExpenditureById(id, allowedNodeIds);
   sendSuccess(res, expenditure);
+}
+
+export async function bulkVerifyExpenditures(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const body = res.locals.body as BulkWorkflowIdsInput;
+  const context = getActorContextWithRole(req);
+  const result = await expenditureService.bulkVerifyExpenditures(body.ids, { remarks: body.remarks }, context);
+  sendSuccess(res, result, { message: `${result.succeeded.length} verified, ${result.failed.length} failed.` });
+}
+
+export async function bulkApproveExpenditures(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const body = res.locals.body as BulkWorkflowIdsInput;
+  const context = getActorContextWithRole(req);
+  const result = await expenditureService.bulkApproveExpenditures(body.ids, { remarks: body.remarks }, context);
+  sendSuccess(res, result, { message: `${result.succeeded.length} approved, ${result.failed.length} failed.` });
+}
+
+export async function bulkRejectExpenditures(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const body = res.locals.body as BulkWorkflowRejectInput;
+  const context = getActorContextWithRole(req);
+  const result = await expenditureService.bulkRejectExpenditures(body.ids, { reason: body.reason }, context);
+  sendSuccess(res, result, { message: `${result.succeeded.length} rejected, ${result.failed.length} failed.` });
 }
 
 export async function createExpenditure(req: AuthenticatedRequest, res: Response): Promise<void> {

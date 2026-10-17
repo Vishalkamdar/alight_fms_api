@@ -855,6 +855,44 @@ export async function rejectExpenditure(id: string, input: { reason: string }, c
 }
 
 // ---------------------------------------------------------------------------
+// Bulk verify/approve/reject — mirrors payroll.service.ts's
+// processBulkWorkflowAction exactly: one HTTP call for the whole selection,
+// each id independently re-validated and processed through the existing
+// single-record function (same permission checks, same transaction), so a
+// batch is never all-or-nothing — one ineligible record is reported as a
+// failure without blocking the rest.
+// ---------------------------------------------------------------------------
+
+export interface BulkWorkflowResult {
+  succeeded: string[];
+  failed: Array<{ id: string; reason: string }>;
+}
+
+async function processBulkWorkflowAction(ids: string[], action: (id: string) => Promise<unknown>): Promise<BulkWorkflowResult> {
+  const result: BulkWorkflowResult = { succeeded: [], failed: [] };
+  for (const id of ids) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await action(id);
+      result.succeeded.push(id);
+    } catch (error) {
+      result.failed.push({ id, reason: error instanceof AppError ? error.message : "Failed to process this Expenditure." });
+    }
+  }
+  return result;
+}
+
+export async function bulkVerifyExpenditures(ids: string[], input: { remarks?: string }, context: ActorContext): Promise<BulkWorkflowResult> {
+  return processBulkWorkflowAction(ids, (id) => verifyExpenditure(id, input, context));
+}
+export async function bulkApproveExpenditures(ids: string[], input: { remarks?: string }, context: ActorContext): Promise<BulkWorkflowResult> {
+  return processBulkWorkflowAction(ids, (id) => approveExpenditure(id, input, context));
+}
+export async function bulkRejectExpenditures(ids: string[], input: { reason: string }, context: ActorContext): Promise<BulkWorkflowResult> {
+  return processBulkWorkflowAction(ids, (id) => rejectExpenditure(id, input, context));
+}
+
+// ---------------------------------------------------------------------------
 // Listing / export / pending-approvals / attachments
 // ---------------------------------------------------------------------------
 

@@ -184,6 +184,8 @@ export function computeVerifyTransition(snapshot: WorkflowSnapshot): { nextStatu
 interface RecordHistoryContext {
   module: FinancialWorkflowModule;
   recordId: Types.ObjectId;
+  /** Set only for a per-employee Payroll action — omitted/undefined for every other module and whole-batch Payroll actions. */
+  employeeLineId?: Types.ObjectId | null;
   organizationNodeId: Types.ObjectId | null;
   amount: number;
 }
@@ -207,6 +209,7 @@ export async function recordWorkflowEvent(
       {
         module: context.module,
         recordId: context.recordId,
+        employeeLineId: context.employeeLineId ?? null,
         organizationNodeId: context.organizationNodeId,
         amount: context.amount,
         action: event.action,

@@ -860,6 +860,14 @@ export async function bulkApproveFundTransfers(
   return processBulkAction(ids, (id) => approveFundTransfer(id, input, context));
 }
 
+export async function bulkRejectFundTransfers(
+  ids: string[],
+  input: { reason: string },
+  context: ActorContext
+): Promise<BulkFundTransferResult> {
+  return processBulkAction(ids, (id) => rejectFundTransfer(id, input, context));
+}
+
 /**
  * The approval-queue node filter for a given stage — a Pull row is
  * actionable if the viewer holds `stage` on its destinationNodeId (the

@@ -390,6 +390,8 @@ export interface EmployeePayrollDetailRow {
   deductions: Record<string, number | null>;
   totalDeduction: number;
   netSalary: number;
+  approvalStatus: string;
+  rejectionReason: string | null;
   paymentStatus: string;
 }
 
@@ -436,6 +438,8 @@ export async function getEmployeePayrollDetail(payrollBatchId: string, actor: Re
       deductions,
       totalDeduction: employee.totalDeduction,
       netSalary: employee.netSalary,
+      approvalStatus: employee.approvalStatus,
+      rejectionReason: employee.rejectionReason,
       paymentStatus: employee.paymentStatus,
     };
   });

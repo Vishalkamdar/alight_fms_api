@@ -13,6 +13,7 @@ import type {
   PayrollExportQuery,
   PayrollListQuery,
 } from "../../schemas/fms/payroll.schema";
+import type { BulkWorkflowRejectInput } from "../../schemas/fms/financial-workflow.schema";
 
 export async function listPayrollBatches(req: AuthenticatedRequest, res: Response): Promise<void> {
   const query = res.locals.query as PayrollListQuery;
@@ -61,6 +62,30 @@ export async function rejectPayrollBatch(req: AuthenticatedRequest, res: Respons
   sendSuccess(res, batch, { message: "Payroll batch rejected." });
 }
 
+export async function verifyPayrollLine(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { id, lineId } = res.locals.params as { id: string; lineId: string };
+  const body = res.locals.body as { remarks?: string };
+  const context = getActorContextWithRole(req);
+  const batch = await payrollService.verifyPayrollLine(id, lineId, body, context);
+  sendSuccess(res, batch, { message: "Employee payroll line verified." });
+}
+
+export async function approvePayrollLine(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { id, lineId } = res.locals.params as { id: string; lineId: string };
+  const body = res.locals.body as { remarks?: string };
+  const context = getActorContextWithRole(req);
+  const batch = await payrollService.approvePayrollLine(id, lineId, body, context);
+  sendSuccess(res, batch, { message: "Employee payroll line approved." });
+}
+
+export async function rejectPayrollLine(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { id, lineId } = res.locals.params as { id: string; lineId: string };
+  const body = res.locals.body as { reason: string };
+  const context = getActorContextWithRole(req);
+  const batch = await payrollService.rejectPayrollLine(id, lineId, body, context);
+  sendSuccess(res, batch, { message: "Employee payroll line rejected." });
+}
+
 export async function retryPayrollPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
   const { id } = res.locals.params as { id: string };
   const employeeLineId = typeof req.query.employeeLineId === "string" ? req.query.employeeLineId : undefined;
@@ -81,6 +106,13 @@ export async function bulkApprovePayrollBatches(req: AuthenticatedRequest, res: 
   const context = getActorContextWithRole(req);
   const result = await payrollService.bulkApprovePayrollBatches(body.ids, { remarks: body.remarks }, context);
   sendSuccess(res, result, { message: `${result.succeeded.length} approved, ${result.failed.length} failed.` });
+}
+
+export async function bulkRejectPayrollBatches(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const body = res.locals.body as BulkWorkflowRejectInput;
+  const context = getActorContextWithRole(req);
+  const result = await payrollService.bulkRejectPayrollBatches(body.ids, { reason: body.reason }, context);
+  sendSuccess(res, result, { message: `${result.succeeded.length} rejected, ${result.failed.length} failed.` });
 }
 
 export async function getMyPendingPayrollBatches(req: AuthenticatedRequest, res: Response): Promise<void> {

@@ -17,6 +17,7 @@ import type {
   CreateBulkBudgetAllocationsInput,
 } from "../../schemas/fms/budget-allocation.schema";
 import type {
+  BulkWorkflowRejectInput,
   WorkflowApproveInput,
   WorkflowRejectInput,
   WorkflowVerifyInput,
@@ -99,6 +100,15 @@ export async function bulkVerifyBudgetAllocations(req: AuthenticatedRequest, res
   const result = await budgetAllocationService.bulkVerifyBudgetAllocations(ids, { remarks }, context);
   sendSuccess(res, result, {
     message: `${result.succeeded.length} verified, ${result.failed.length} failed.`,
+  });
+}
+
+export async function bulkRejectBudgetAllocations(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const { ids, reason } = res.locals.body as BulkWorkflowRejectInput;
+  const context = getActorContextWithRole(req);
+  const result = await budgetAllocationService.bulkRejectBudgetAllocations(ids, { reason }, context);
+  sendSuccess(res, result, {
+    message: `${result.succeeded.length} rejected, ${result.failed.length} failed.`,
   });
 }
 

@@ -31,6 +31,23 @@ import type { DashboardQuery } from "../../schemas/fms/dashboard.schema";
 
 type ActorContext = ReportActorContext;
 
+/**
+ * Payroll's net-salary figures must be summed per EMPLOYEE LINE, not read
+ * off the batch's fixed totalNetSalary — since a per-employee approval can
+ * leave a batch rolled up to APPROVED while one of its lines was rejected
+ * (never paid, never truly "approved payroll"), summing the batch total
+ * would silently count that rejected employee's salary too.
+ */
+async function sumPayrollLineNetSalary(docMatch: Record<string, unknown>, lineMatch: Record<string, unknown>): Promise<number> {
+  const rows = await PayrollBatchModel.aggregate<{ _id: null; sum: number }>([
+    { $match: docMatch },
+    { $unwind: "$employees" },
+    { $match: lineMatch },
+    { $group: { _id: null, sum: { $sum: "$employees.netSalary" } } },
+  ]);
+  return rows[0]?.sum ?? 0;
+}
+
 // ---------------------------------------------------------------------------
 // §2 — Top budget KPIs
 // ---------------------------------------------------------------------------
@@ -104,12 +121,10 @@ export async function getBudgetKpis(
       ...nodeFilter(effectiveNodeIds),
       ...headMatch,
     }),
-    sumField(PayrollBatchModel, "totalNetSalary", {
-      financialYearId: fyObjectId,
-      approvalStatus: "APPROVED",
-      ...nodeFilter(effectiveNodeIds),
-      ...payrollHeadMatch,
-    }),
+    sumPayrollLineNetSalary(
+      { financialYearId: fyObjectId, ...nodeFilter(effectiveNodeIds), ...payrollHeadMatch },
+      { "employees.approvalStatus": "APPROVED" }
+    ),
   ]);
 
   return { totalBudget, allocated, available, onHold, totalExpenditure, totalPayroll };
@@ -482,12 +497,20 @@ export async function getPayrollOverview(
   const currentMonthName = new Date().toLocaleString("en-US", { month: "long" });
 
   const [currentMonthPayroll, pendingApproval, paid, trendRows, employeeAgg] = await Promise.all([
-    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, approvalStatus: "APPROVED", month: currentMonthName, ...nodeMatch, ...headMatch }),
-    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...headMatch }),
-    sumField(PayrollBatchModel, "totalNetSalary", { financialYearId: fyObjectId, paymentStatus: "PAYMENT_SUCCESS", ...nodeMatch, ...headMatch }),
+    sumPayrollLineNetSalary(
+      { financialYearId: fyObjectId, month: currentMonthName, ...nodeMatch, ...headMatch },
+      { "employees.approvalStatus": "APPROVED" }
+    ),
+    sumPayrollLineNetSalary(
+      { financialYearId: fyObjectId, ...nodeMatch, ...headMatch },
+      { "employees.approvalStatus": { $in: PENDING_STATUSES } }
+    ),
+    sumPayrollLineNetSalary({ financialYearId: fyObjectId, ...nodeMatch, ...headMatch }, { "employees.paymentStatus": "PAYMENT_SUCCESS" }),
     PayrollBatchModel.aggregate<{ _id: string; amount: number }>([
-      { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch, ...headMatch } },
-      { $group: { _id: "$month", amount: { $sum: "$totalNetSalary" } } },
+      { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
+      { $unwind: "$employees" },
+      { $match: { "employees.approvalStatus": "APPROVED" } },
+      { $group: { _id: "$month", amount: { $sum: "$employees.netSalary" } } },
     ]),
     PayrollBatchModel.aggregate<{ _id: null; employeeIds: Types.ObjectId[] }>([
       { $match: { financialYearId: fyObjectId, ...nodeMatch, ...headMatch } },
