@@ -302,7 +302,14 @@ export async function computeNodeFinancialSummaries(
 ): Promise<NodeSummaryRow[]> {
   const nodeMatch = nodeFilter(nodeIds);
   const headMatch = headFilter(headIds);
-  const [allocationRows, expenditureRows, onHoldExpRows, onHoldAllocRows, nodes] = await Promise.all([
+  // PayrollBatch has no "headId" field — only a root-pool
+  // "schemeHeadRootNodeId" (same resolution the dashboard's own KPIs use
+  // for Payroll elsewhere in this file) — reusing the default-field
+  // headMatch here would silently match zero Payroll rows whenever a Head
+  // restriction is active.
+  const payrollHeadRootIds = headIds === null ? null : await resolveHeadRootIds(headIds);
+  const payrollHeadMatch = headFilter(payrollHeadRootIds, "schemeHeadRootNodeId");
+  const [allocationRows, expenditureRows, onHoldExpRows, onHoldAllocRows, onHoldPayrollRows, nodes] = await Promise.all([
     BudgetAllocationModel.aggregate<{ _id: Types.ObjectId; amount: number; subAllocated: number }>([
       { $match: { financialYearId: fyObjectId, approvalStatus: "APPROVED", ...nodeMatch, ...headMatch } },
       { $group: { _id: "$organizationNodeId", amount: { $sum: "$amount" }, subAllocated: { $sum: "$subAllocatedAmount" } } },
@@ -319,6 +326,14 @@ export async function computeNodeFinancialSummaries(
       { $match: { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...headMatch } },
       { $group: { _id: "$organizationNodeId", amount: { $sum: "$holdingAmount" } } },
     ]),
+    // Payroll's holdingAmount is a maintained rollup over its employee
+    // lines (§ per-employee approval) — correct here even for a batch
+    // mid-way through mixed-stage per-employee approval, same as every
+    // other PENDING_STATUSES-filtered holdingAmount sum on this page.
+    PayrollBatchModel.aggregate<{ _id: Types.ObjectId; amount: number }>([
+      { $match: { financialYearId: fyObjectId, approvalStatus: { $in: PENDING_STATUSES }, ...nodeMatch, ...payrollHeadMatch } },
+      { $group: { _id: "$organizationNodeId", amount: { $sum: "$holdingAmount" } } },
+    ]),
     OrganizationNodeModel.find(nodeIds === null ? { status: "Active" } : { _id: { $in: toObjectIds(nodeIds) } })
       .select("_id name")
       .lean(),
@@ -327,7 +342,7 @@ export async function computeNodeFinancialSummaries(
   const allocationMap = new Map(allocationRows.map((r) => [String(r._id), r]));
   const expenditureMap = new Map(expenditureRows.map((r) => [String(r._id), r.amount]));
   const onHoldMap = new Map<string, number>();
-  for (const r of [...onHoldExpRows, ...onHoldAllocRows]) {
+  for (const r of [...onHoldExpRows, ...onHoldAllocRows, ...onHoldPayrollRows]) {
     const key = String(r._id);
     onHoldMap.set(key, (onHoldMap.get(key) ?? 0) + r.amount);
   }
