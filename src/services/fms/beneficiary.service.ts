@@ -218,13 +218,15 @@ async function buildNodeNameMap(nodeIds: Array<Types.ObjectId | null>): Promise<
  * Re-checks, server-side, exactly the rules the schema's superRefine
  * already enforces on well-formed input — a crafted request that skips the
  * Zod layer (or a bulk-import row, which doesn't go through it at all)
- * must still never be able to create an Employee without PAN/Employee ID
+ * must still never be able to create an Employee without an Employee ID
  * or a Vendor without a Contact Person, and must never end up with zero
  * or multiple default bank accounts while on BANK payment mode (§18).
  * GST is intentionally not required for Vendor — plenty of real vendors
  * legitimately have none (unregistered, below threshold, individuals); a
  * GST value is still format-validated when one IS provided, just never
- * mandatory to have.
+ * mandatory to have. PAN is likewise optional for Employee (and already
+ * was for Vendor) — format-validated by the schema when present, never
+ * required to exist at all.
  */
 function assertTypeRulesAndNormalize(input: {
   beneficiaryType: BeneficiaryType;
@@ -239,7 +241,6 @@ function assertTypeRulesAndNormalize(input: {
     if (!input.contactPersonName) throw new AppError(422, "Contact Person Name is required for a Vendor.", { contactPersonName: ["Required for Vendor."] });
   } else {
     if (!input.employeeId) throw new AppError(422, "Employee ID is required for an Employee.", { employeeId: ["Required for Employee."] });
-    if (!input.panNumber) throw new AppError(422, "PAN Number is required for an Employee.", { panNumber: ["Required for Employee."] });
     if (input.gstNumber) throw new AppError(422, "GST Number is not applicable for an Employee.", { gstNumber: ["Not applicable for Employee."] });
   }
 

@@ -72,8 +72,8 @@ const baseBeneficiaryFields = {
 };
 
 /**
- * Vendor requires a Contact Person; Employee requires an Employee ID and
- * PAN but never GST — these per-type rules are the real authorization/
+ * Vendor requires a Contact Person; Employee requires an Employee ID but
+ * never GST — these per-type rules are the real authorization/
  * data-integrity boundary (§18 — a crafted request can't get around them by
  * omitting beneficiaryType-specific checks), so they're enforced here in
  * the schema, not just hinted at in the frontend form.
@@ -83,6 +83,11 @@ const baseBeneficiaryFields = {
  * none. When a GST number IS provided it still has to be a validly
  * formatted one (see gstNumber's own regex above); it's just never
  * mandatory to have one at all.
+ *
+ * PAN is likewise optional for Employee (not every employee has one on
+ * file yet) — the base panNumber field above already enforces the format
+ * whenever a value IS entered, for both Vendor and Employee alike, so no
+ * extra check is needed here beyond simply not requiring presence.
  */
 function applyBeneficiaryTypeRules<T extends z.ZodTypeAny>(schema: T) {
   return schema.superRefine((data: z.infer<typeof schema>, ctx) => {
@@ -103,9 +108,6 @@ function applyBeneficiaryTypeRules<T extends z.ZodTypeAny>(schema: T) {
     } else {
       if (!d.employeeId) {
         ctx.addIssue({ code: "custom", path: ["employeeId"], message: "Employee ID is required for an Employee." });
-      }
-      if (!d.panNumber) {
-        ctx.addIssue({ code: "custom", path: ["panNumber"], message: "PAN Number is required for an Employee." });
       }
       if (d.gstNumber) {
         ctx.addIssue({ code: "custom", path: ["gstNumber"], message: "GST Number is not applicable for an Employee." });
